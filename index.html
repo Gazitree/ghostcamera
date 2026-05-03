@@ -1474,11 +1474,27 @@ function initSegmentation() {
   sendFrame()
 }
 
+let frameSkip = 0
+const isMobileDevice = window.innerWidth <= 720
+
 function sendFrame() {
-  if (state.video && state.video.readyState >= 2)
-    state.segmentation.send({ image: state.video })
-  else
+  if (state.video && state.video.readyState >= 2) {
+    if (isMobileDevice) {
+      // 모바일: 2프레임당 1번만 세그멘테이션 (CPU 부하 반감)
+      frameSkip++
+      if (frameSkip % 2 === 0) {
+        state.segmentation.send({ image: state.video })
+      } else {
+        // 스킵 프레임: 이전 결과로 다시 그리기만
+        if (state.lastSegResults) drawFrame(state.lastSegResults)
+        requestAnimationFrame(sendFrame)
+      }
+    } else {
+      state.segmentation.send({ image: state.video })
+    }
+  } else {
     requestAnimationFrame(sendFrame)
+  }
 }
 
 function onSegResults(results) {
@@ -1655,7 +1671,9 @@ function computeGhostPlacement(pb,w,h,ghost){
 // ── CCTV Filter ───────────────────────────────────────────────────────────────
 function applyCCTVFilter(ctx,w,h){
   const id=ctx.getImageData(0,0,w,h),d=id.data
-  for(let i=0;i<d.length;i+=4){
+  // 모바일: 2픽셀씩 건너뛰기 (시각적 차이 거의 없음)
+  const step = (w < 720) ? 8 : 4
+  for(let i=0;i<d.length;i+=step){
     d[i]  = d[i]*0.13
     d[i+1]= d[i+1]*0.25
     d[i+2]= Math.min(d[i+2]*1.55+30, 255)
@@ -1665,14 +1683,14 @@ function applyCCTVFilter(ctx,w,h){
   const lineH  = Math.max(1, Math.round(2 * scale))
   const lineGap = Math.max(2, Math.round(4 * scale))
   state.scanlineOffset=(state.scanlineOffset+0.9*scale)%h
-  // 스캔라인 더 선명하게
   ctx.fillStyle='rgba(255,255,255,0.18)'
   for(let y=0;y<h;y+=lineGap) ctx.fillRect(0,(y+state.scanlineOffset)%h,w,lineH)
-  const nc=Math.round(2400*(w*h)/(1280*720))
+  // 모바일: 노이즈 입자 수 줄이기
+  const ncBase = (w < 720) ? 800 : 2400
+  const nc=Math.round(ncBase*(w*h)/(1280*720))
   const dotS = Math.max(1, Math.round(scale))
   ctx.fillStyle='rgba(160,200,255,0.32)'
   for(let i=0;i<nc;i++) ctx.fillRect(Math.random()*w,Math.random()*h,dotS,dotS)
-  // 비네팅
   const vg=ctx.createRadialGradient(w/2,h/2,h*0.22,w/2,h/2,h*0.88)
   vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,18,0.88)')
   ctx.fillStyle=vg; ctx.fillRect(0,0,w,h)
