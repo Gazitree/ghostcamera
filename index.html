@@ -1093,7 +1093,17 @@ function startStaticRender(camNum) {
         }
         ctx.drawImage(src, dx, dy, dw, dh)
       }
-      applyStaticFilter(ctx, w, h)
+      applyStaticFilter(ctx, w, h, false, true)
+
+      // 타임스탬프 (비네팅 뒤)
+      const dpr = window.devicePixelRatio || 1
+      applyCCTVTimestamp(ctx, w, h, 'rgba(255,255,255,0.85)')
+
+      // 스캔라인만 살짝 위에
+      const tsLineH = Math.ceil(2 * dpr)
+      const tsLineGap = Math.ceil(4 * dpr)
+      ctx.fillStyle='rgba(0,0,0,0.15)'
+      for(let y=0;y<h;y+=tsLineGap) ctx.fillRect(0,(y+state.staticScanOffset)%h,w,tsLineH)
     }
     state.staticCanvasRaf = requestAnimationFrame(render)
   }
@@ -1536,26 +1546,34 @@ function drawFrame(results) {
   const tctx = tc1.getContext('2d')
   tctx.drawImage(canvas, 0, 0, tc1.width, tc1.height)
 
-  // CAM01 타임스탬프 — 화면에 보이는 크기 기준
+  // CAM01 타임스탬프 + CAM 라벨 — 비네팅 뒤에 (선명하게)
   {
     const now=new Date()
     const mo=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][now.getMonth()]
     const dd=String(now.getDate()).padStart(2,'0'),yr=now.getFullYear()
     let hh=now.getHours(); const ap=hh>=12?'PM':'AM'; hh=hh%12||12
     const mm=String(now.getMinutes()).padStart(2,'0'),ss=String(now.getSeconds()).padStart(2,'0')
-    // 화면 표시 크기 기준 scale (캔버스 픽셀 해상도와 무관)
     const dispH = canvas.getBoundingClientRect().height || h
-    const ratio = h / dispH  // 캔버스 픽셀 → CSS px 변환 비율
+    const ratio = h / dispH
     const sc = dispH / 720
     const fs = Math.round(18 * sc)
     const px = Math.round(22 * sc)
     const y1 = h - Math.round(39 * sc * ratio)
     const y2 = h - Math.round(16 * sc * ratio)
+
+    // 타임스탬프
     ctx.font=`${Math.round(fs * ratio)}px monospace`; ctx.fillStyle='#7eb8ff'
     ctx.shadowColor='#7eb8ff'; ctx.shadowBlur=5
     ctx.fillText(`${mo} ${dd} ${yr}`, Math.round(px * ratio), y1)
     ctx.fillText(`${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`, Math.round(px * ratio), y2)
     ctx.shadowBlur=0
+
+    // 스캔라인만 살짝 위에 (자연스러운 줄무늬)
+    const scale01 = h / 720
+    const tsLineH = Math.max(1, Math.round(2 * scale01))
+    const tsLineGap = Math.max(2, Math.round(4 * scale01))
+    ctx.fillStyle='rgba(0,0,0,0.12)'
+    for(let y=0;y<h;y+=tsLineGap) ctx.fillRect(0,(y+state.scanlineOffset)%h,w,tsLineH)
   }
 }
 
@@ -1683,14 +1701,15 @@ function applyCCTVTimestamp(ctx, w, h, color) {
   const fs = Math.round(18 * sc)
   const padX = Math.round(22 * sc * ratio)
   ctx.font=`${Math.round(fs * ratio)}px monospace`; ctx.fillStyle=c
-  ctx.shadowColor=c; ctx.shadowBlur=5
+  // CAM01(파란색)만 glow, CAM02/03(흰색)은 번짐 방지로 glow 없음
+  if (c === '#7eb8ff') { ctx.shadowColor=c; ctx.shadowBlur=5 }
   ctx.fillText(`${mo} ${dd} ${yr}`, padX, h-Math.round(39*sc*ratio))
   ctx.fillText(`${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`, padX, h-Math.round(16*sc*ratio))
   ctx.shadowBlur=0
 }
 
 // ── Static Filter (CAM02/03 — 노이즈만, 블루톤/타임스탬프 없음) ───────────────
-function applyStaticFilter(ctx,w,h,isThumb){
+function applyStaticFilter(ctx,w,h,isThumb,skipTimestamp){
   const dpr = window.devicePixelRatio || 1
   // 스캔라인
   state.staticScanOffset=(state.staticScanOffset+0.9*dpr)%h
@@ -1709,8 +1728,8 @@ function applyStaticFilter(ctx,w,h,isThumb){
   const vg=ctx.createRadialGradient(w/2,h/2,h*0.22,w/2,h/2,h*0.88)
   vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,0,0.7)')
   ctx.fillStyle=vg; ctx.fillRect(0,0,w,h)
-  // 타임스탬프 — 썸네일은 스킵
-  if (!isThumb) applyCCTVTimestamp(ctx, w, h, 'rgba(255,255,255,0.85)')
+  // 타임스탬프 — 메인뷰는 밖에서 그림, 그 외는 여기서
+  if (!isThumb && !skipTimestamp) applyCCTVTimestamp(ctx, w, h, 'rgba(255,255,255,0.85)')
 }
 
 // ── Capture (CAM01 전용) ──────────────────────────────────────────────────────
@@ -1780,6 +1799,9 @@ async function onShutter(){
   if(tooltipTimer) { clearTimeout(tooltipTimer); tooltipTimer = null }
   document.getElementById('shutter-tooltip').classList.remove('visible')
 
+  // CAM02/03: 셔터 클릭 순간 즉시 스냅샷 (대기 전에!)
+  const staticSnapshot = (cam === 2 || cam === 3) ? buildStaticCapture(cam) : null
+
   const flash=document.getElementById('flash'),dev=document.getElementById('dev-text')
   flash.style.transition='opacity 0.04s'; flash.style.opacity='1'
   await sleep(80)
@@ -1791,8 +1813,7 @@ async function onShutter(){
   if(cam === 1) {
     cap = buildCaptureCanvas(state.lastSegResults)
   } else {
-    // CAM02/03: 현재 정적 캔버스 스크린샷 + ghost_normal 합성
-    cap = buildStaticCapture(cam)
+    cap = staticSnapshot
   }
 
   state.lastDataURL=cap.toDataURL('image/png')
@@ -1820,21 +1841,8 @@ function buildStaticCapture(camNum) {
   cap.height = sc.height || 540
   const ctx = cap.getContext('2d')
 
-  // 현재 화면 그대로 복사
+  // 현재 화면 그대로 복사 (타임스탬프 이미 포함됨)
   ctx.drawImage(sc, 0, 0, cap.width, cap.height)
-
-  // 타임스탬프
-  const scale = cap.height/720, fs = Math.round(18*scale), padX = Math.round(22*scale)
-  const now=new Date()
-  const mo=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][now.getMonth()]
-  const dd=String(now.getDate()).padStart(2,'0'),yr=now.getFullYear()
-  let hh=now.getHours(); const ap=hh>=12?'PM':'AM'; hh=hh%12||12
-  const mm=String(now.getMinutes()).padStart(2,'0'),ss=String(now.getSeconds()).padStart(2,'0')
-  ctx.font=`${fs}px monospace`; ctx.fillStyle='rgba(255,255,255,0.85)'
-  ctx.shadowColor='#fff'; ctx.shadowBlur=4
-  ctx.fillText(`${mo} ${dd} ${yr}`,padX,cap.height-Math.round(42*scale))
-  ctx.fillText(`${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`,padX,cap.height-Math.round(16*scale))
-  ctx.shadowBlur=0
   return cap
 }
 
@@ -1842,27 +1850,6 @@ function buildStaticCapture(camNum) {
 function saveImage(){
   if(!state.lastDataURL) return
   if(isKakaoInApp()) { showKakaoNotice(); return }
-  const filename = `ghost_${Date.now()}.png`
-  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent)
-  if (isIOS && navigator.share) {
-    fetch(state.lastDataURL)
-      .then(r => r.blob())
-      .then(blob => {
-        const file = new File([blob], filename, { type: 'image/png' })
-        if (navigator.canShare && navigator.canShare({ files: [file] })) {
-          navigator.share({ files: [file], title: 'Ghost Camera' })
-            .catch(() => fallbackSave())
-        } else {
-          fallbackSave()
-        }
-      }).catch(() => fallbackSave())
-    return
-  }
-  fallbackSave()
-}
-
-function fallbackSave(){
-  if(!state.lastDataURL) return
   try {
     const a = document.createElement('a')
     a.href = state.lastDataURL
@@ -1874,6 +1861,7 @@ function fallbackSave(){
     window.open(state.lastDataURL, '_blank')
   }
 }
+
 function retake(){ showScreen('screen-camera'); startTooltipTimer() }
 
 // ── 공유하기 ──────────────────────────────────────────────────────────────────
