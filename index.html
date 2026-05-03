@@ -155,6 +155,10 @@
       background: #000; overflow: hidden;
     }
     #main-canvas { width: 100%; height: 100%; object-fit: cover; display: block; }
+    #ts-overlay-canvas {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      pointer-events: none; z-index: 4;
+    }
     #main-static-canvas {
       position: absolute; inset: 0; width: 100%; height: 100%;
       display: none; pointer-events: none;
@@ -633,6 +637,7 @@
     <!-- 좌측 메인뷰 -->
     <div id="main-view">
       <canvas id="main-canvas"></canvas>
+      <canvas id="ts-overlay-canvas"></canvas>
       <canvas id="main-static-canvas"></canvas>
       <canvas id="main-noise-canvas"></canvas>
       <div class="main-cam-label" id="main-cam-label">CAM 01</div>
@@ -1020,6 +1025,8 @@ function selectCam(n) {
   mc.style.display  = 'none'
   msc.style.display = 'none'
   mnc.style.display = 'none'
+  const tsc = document.getElementById('ts-overlay-canvas')
+  if (tsc) tsc.style.display = 'none'
   stopStaticRender()
   stopMainNoise()
 
@@ -1030,6 +1037,7 @@ function selectCam(n) {
 
   if (n === 1) {
     mc.style.display = 'block'
+    if (tsc) tsc.style.display = 'block'
   } else if (n === 2 || n === 3) {
     msc.style.display = 'block'
     startStaticRender(n)
@@ -1542,19 +1550,32 @@ function drawFrame(results) {
   const tctx = tc1.getContext('2d')
   tctx.drawImage(canvas, 0, 0, tc1.width, tc1.height)
 
-  // CAM01 타임스탬프
+  // CAM01 타임스탬프 — 별도 고해상도 오버레이 캔버스
   {
+    const tsc = document.getElementById('ts-overlay-canvas')
+    const mainView = document.getElementById('main-view')
+    const dpr = window.devicePixelRatio || 1
+    const cssW = mainView.offsetWidth || 960
+    const cssH = mainView.offsetHeight || 540
+    if (tsc.width !== cssW * dpr || tsc.height !== cssH * dpr) {
+      tsc.width = cssW * dpr
+      tsc.height = cssH * dpr
+    }
+    const tsCtx = tsc.getContext('2d')
+    tsCtx.clearRect(0, 0, tsc.width, tsc.height)
     const now=new Date()
     const mo=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][now.getMonth()]
     const dd=String(now.getDate()).padStart(2,'0'),yr=now.getFullYear()
     let hh=now.getHours(); const ap=hh>=12?'PM':'AM'; hh=hh%12||12
     const mm=String(now.getMinutes()).padStart(2,'0'),ss=String(now.getSeconds()).padStart(2,'0')
-    const sc=h/720, fs=Math.round(18*sc), px=Math.round(22*sc)
-    ctx.font=`${fs}px monospace`; ctx.fillStyle='#7eb8ff'
-    ctx.shadowColor='#7eb8ff'; ctx.shadowBlur=5
-    ctx.fillText(`${mo} ${dd} ${yr}`,px,h-Math.round(39*sc))
-    ctx.fillText(`${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`,px,h-Math.round(16*sc))
-    ctx.shadowBlur=0
+    const sc = cssH / 720
+    const fs = Math.round(18 * sc * dpr)
+    const px = Math.round(22 * sc * dpr)
+    tsCtx.font=`${fs}px monospace`; tsCtx.fillStyle='#7eb8ff'
+    tsCtx.shadowColor='#7eb8ff'; tsCtx.shadowBlur=5*dpr
+    tsCtx.fillText(`${mo} ${dd} ${yr}`, px, tsc.height - Math.round(39*sc*dpr))
+    tsCtx.fillText(`${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`, px, tsc.height - Math.round(16*sc*dpr))
+    tsCtx.shadowBlur=0
   }
 }
 
