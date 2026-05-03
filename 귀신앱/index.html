@@ -1,0 +1,1954 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Ghost Camera</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #000;
+      font-family: monospace;
+      width: 100vw; height: 100vh;
+      overflow: hidden;
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    /* ── letterbox wrapper ── */
+    #ui-wrapper {
+      position: relative;
+      background: #000;
+      flex-shrink: 0;
+      overflow: hidden;
+      /* 초기 크기: JS가 덮어쓰기 전 fallback */
+      width: 100vw;
+      height: 100vh;
+    }
+
+    .screen {
+      display: none; width: 100%; height: 100%;
+      flex-direction: column; align-items: center; justify-content: center;
+    }
+    .screen.active { display: flex; }
+
+    /* ── Onboarding (기존 폴백) ── */
+    #screen-onboarding { background: #000; gap: 28px; }
+    .logo-title { font-size: 26px; letter-spacing: 8px; color: #7eb8ff; text-shadow: 0 0 24px #7eb8ff55; }
+    .subtitle { font-size: 11px; color: #3a5a80; letter-spacing: 2px; margin-top: -8px; }
+    .btn-start {
+      margin-top: 16px; padding: 14px 44px; background: transparent;
+      border: 1px solid #7eb8ff33; color: #7eb8ff; font-family: monospace;
+      font-size: 13px; letter-spacing: 4px; cursor: pointer; transition: all 0.25s;
+    }
+    .btn-start:hover { border-color: #7eb8ffaa; background: #7eb8ff0d; }
+
+    /* ── 인트로 오버레이 ── */
+    #intro-overlay {
+      position: fixed; inset: 0; z-index: 9999;
+      background: #000;
+      display: flex; align-items: center; justify-content: center;
+      transition: opacity 0.6s ease;
+    }
+    #intro-overlay.fade-out { opacity: 0; pointer-events: none; }
+
+    /* 슬라이스 컨테이너 — 검증된 픽셀 좌표 기반 */
+    /*
+      전체: 1808 x 1808
+      s01: (0,0)        1808x1210
+      s02: (0,1210)      520x598
+      s03: (520,1210)    850x256  ← 버튼
+      s05: (520,1466)    850x342
+      s04: (1370,1210)   438x598
+    */
+    #intro-grid {
+      position: relative;
+      opacity: 0;
+      transition: opacity 0.8s ease;
+      width: min(90vw, 90vh);
+      aspect-ratio: 1 / 1;
+      flex-shrink: 0;
+    }
+    #intro-grid.visible { opacity: 1; }
+    #intro-grid img { position: absolute; display: block; }
+
+    #intro-s01 {
+      left: 0; top: 0;
+      width: 100%;
+      height: calc(100% * 1210 / 1808);
+    }
+    #intro-s02 {
+      left: 0;
+      top: calc(100% * 1210 / 1808);
+      width: calc(100% * 520 / 1808);
+      height: calc(100% * 598 / 1808);
+    }
+    #intro-s03 {
+      left: calc(100% * 520 / 1808);
+      top: calc(100% * 1210 / 1808);
+      width: calc(100% * 850 / 1808);
+      height: calc(100% * 256 / 1808);
+      cursor: pointer;
+    }
+    #intro-s05 {
+      left: calc(100% * 520 / 1808);
+      top: calc(100% * 1466 / 1808);
+      width: calc(100% * 850 / 1808);
+      height: calc(100% * 342 / 1808);
+    }
+    #intro-s04 {
+      left: calc(100% * 1370 / 1808);
+      top: calc(100% * 1210 / 1808);
+      width: calc(100% * 438 / 1808);
+      height: calc(100% * 598 / 1808);
+    }
+
+    #intro-loading { display: none; }
+
+    /* 음악 on/off 버튼 */
+    #music-btn {
+      position: fixed;
+      top: 14px; right: 14px;
+      z-index: 99999;
+      background: none;
+      border: none;
+      cursor: pointer;
+      opacity: 0.35;
+      transition: opacity 0.2s;
+      font-size: 20px;
+      color: #fff;
+      padding: 6px;
+      line-height: 1;
+    }
+    #music-btn:hover { opacity: 0.7; }
+
+    /* CCTV 화면 페이드인 */
+    #ui-wrapper {
+      opacity: 0;
+      transition: opacity 1s ease;
+    }
+    #ui-wrapper.fadein { opacity: 1; }
+
+    /* 글리치 애니메이션 */
+    @keyframes introGlitch {
+      0%   { transform: translateX(0) skewX(0); filter: brightness(1); }
+      15%  { transform: translateX(-12px) skewX(-2deg); filter: brightness(2) contrast(2); }
+      30%  { transform: translateX(10px) skewX(1deg); filter: brightness(0.3) hue-rotate(90deg); }
+      50%  { transform: translateX(-6px); filter: brightness(1.8) contrast(1.5); }
+      70%  { transform: translateX(8px) skewX(-1deg); filter: brightness(0.5); }
+      85%  { transform: translateX(-3px); filter: brightness(1.5); }
+      100% { transform: translateX(0) skewX(0); filter: brightness(1); }
+    }
+    .intro-glitch-active { animation: introGlitch 0.35s steps(1) forwards; }
+
+    /* ── Camera Screen: 좌측 메인 + 우측 패널 ── */
+    #screen-camera {
+      position: relative; background: #000;
+      display: none; width: 100%; height: 100%; flex-direction: row;
+    }
+    #screen-camera.active { display: flex; }
+    video { display: none; }
+
+    /* ── 좌측 메인뷰 ── */
+    #main-view {
+      position: relative; flex: 1; height: 100%; min-width: 0;
+      background: #000; overflow: hidden;
+    }
+    #main-canvas { width: 100%; height: 100%; object-fit: cover; display: block; }
+    #main-static-canvas {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      display: none; pointer-events: none;
+    }
+    #main-noise-canvas {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      display: none; pointer-events: none;
+    }
+    @keyframes flicker {
+      0%   { opacity: 0.8; }
+      48%  { opacity: 0.7; }
+      50%  { opacity: 0.4; }
+      52%  { opacity: 0.8; }
+      100% { opacity: 0.75; }
+    }
+    #main-timestamp {
+      position: absolute;
+      bottom: 16px; left: 22px;
+      font-family: monospace;
+      font-weight: normal;
+      font-size: 18px;
+      color: rgba(180, 220, 255, 0.85);
+      text-shadow: 0 0 5px #7eb8ff;
+      pointer-events: none;
+      z-index: 10;
+      white-space: pre;
+      line-height: 1.65;
+      letter-spacing: 0px;
+      animation: flicker 1.5s infinite;
+      display: none;
+    }
+    #main-timestamp.visible { display: block; }
+    .main-cam-label {
+      position: absolute; top: 12px; left: 14px;
+      font-size: 37px; letter-spacing: 3px; color: #fff;
+      text-shadow: 0 0 4px #7eb8ff88;
+      pointer-events: none; z-index: 10;
+    }
+    @media (max-width: 720px) {
+      #main-timestamp {
+        font-size: 13px !important;
+        bottom: 12px !important;
+        left: 14px !important;
+        line-height: 1.4 !important;
+      }
+      .main-cam-label {
+        font-size: 22px !important;
+        top: 8px !important;
+        left: 10px !important;
+      }
+    }
+    .shutter-btn {
+      position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%);
+      width: 72px; height: 72px; border-radius: 50%; background: rgba(0,0,0,0.3);
+      border: 2px solid #7eb8ff88; cursor: pointer; display: flex;
+      align-items: center; justify-content: center;
+      -webkit-tap-highlight-color: transparent; z-index: 20;
+    }
+    .shutter-btn::after {
+      content: ''; width: 56px; height: 56px; border-radius: 50%;
+      background: rgba(126,184,255,0.22); transition: background 0.1s;
+    }
+    .shutter-btn:hover::after { background: rgba(126,184,255,0.40); }
+    .shutter-btn:active::after { background: #fff; }
+    .shutter-btn.hidden { display: none; }
+
+    /* CAM02/03 셔터 무채색 — PC만 */
+    @media (min-width: 721px) {
+      .cam-static .shutter-btn {
+        border-color: rgba(180,180,180,0.5) !important;
+        background: rgba(0,0,0,0.35) !important;
+      }
+      .cam-static .shutter-btn::after {
+        background: rgba(180,180,180,0.18) !important;
+      }
+      .cam-static .shutter-btn:hover::after {
+        background: rgba(200,200,200,0.35) !important;
+      }
+    }
+
+    /* 결과화면 타이틀 */
+    #result-title {
+      font-family: monospace;
+      font-size: 12px;
+      letter-spacing: 4px;
+      color: rgba(126,184,255,0.75);
+      text-align: center;
+      position: relative;
+      padding: 4px 0;
+      animation: titleFlicker 3s infinite;
+    }
+    @keyframes titleFlicker {
+      0%,100% { opacity: 0.80; }
+      45%      { opacity: 0.70; }
+      47%      { opacity: 0.40; }
+      49%      { opacity: 0.75; }
+      80%      { opacity: 0.65; }
+    }
+    /* Presence Overlay — 착각 연출 */
+    #presence-overlay {
+      position: absolute; inset: 0; pointer-events: none; z-index: 6;
+      background: radial-gradient(
+        circle at var(--px, 60%) var(--py, 40%),
+        rgba(0,0,0,0.18),
+        transparent 65%
+      );
+      opacity: 0;
+      transition: opacity 1.2s ease;
+    }
+    #shutter-tooltip {
+      position: absolute;
+      bottom: calc(28px + 72px + 10px);
+      left: 50%; transform: translateX(-50%);
+      pointer-events: none; z-index: 25;
+      opacity: 0; transition: opacity 0.4s ease;
+      display: flex; flex-direction: column; align-items: center;
+    }
+    #shutter-tooltip.visible { opacity: 1; }
+    #tooltip-box {
+      background: rgba(0,8,20,0.85);
+      border: 1px solid #7eb8ff66;
+      color: #7eb8ff; font-family: monospace; font-size: 11px;
+      letter-spacing: 1.5px; padding: 8px 16px;
+      white-space: nowrap;
+    }
+    #tooltip-arrow {
+      width: 12px; height: 7px; display: block; margin-top: -1px;
+    }
+
+    /* 저장 안내 — 메인뷰 우측 하단 */
+    #save-notice {
+      position: absolute;
+      bottom: 6px; right: 14px;
+      font-family: monospace; font-size: 9px; letter-spacing: 0px;
+      color: rgba(126,184,255,0.22); pointer-events: none; z-index: 20;
+      white-space: nowrap; display: none;
+    }
+    #save-notice.visible { display: block; }
+    @media (max-width: 720px) {
+      #shutter-tooltip {
+        position: fixed !important;
+        bottom: calc(24px + 60px + 12px) !important;
+        z-index: 200;
+      }
+      #save-notice {
+        bottom: 4px !important;
+        right: 10px !important;
+        left: auto !important;
+        font-size: 8px !important;
+      }
+        position: fixed !important;
+        bottom: 6px !important;
+        z-index: 200;
+      }
+    }
+    #shutter-wrap { display: none; }
+    #flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; z-index: 30; }
+    #dev-text {
+      position: absolute; bottom: 136px; left: 50%; transform: translateX(-50%);
+      font-size: 11px; color: #7eb8ff; letter-spacing: 4px;
+      opacity: 0; pointer-events: none; white-space: nowrap; z-index: 20;
+    }
+    #loading-text {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+      font-size: 11px; color: #3a5a80; letter-spacing: 3px; z-index: 10;
+      white-space: nowrap;
+    }
+
+    /* ── 우측 패널 ── */
+    #side-panel {
+      width: 220px; height: 100%; background: #050508;
+      border-left: 1px solid #111; display: flex; flex-direction: column;
+      flex-shrink: 0;
+    }
+
+    /* 썸네일 공통 — height는 JS가 정확히 주입, 절대 늘어나지 않음 */
+    .cam-thumb {
+      position: relative;
+      width: 100%;
+      flex-shrink: 0;
+      flex-grow: 0;
+      border-bottom: 1px solid #111;
+      cursor: pointer;
+      overflow: hidden;
+      background: #000;
+    }
+    /* 캔버스: 부모를 꽉 채우되 원본 비율 유지 (attribute가 비율 정보 보유) */
+    .cam-thumb canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .cam-thumb-label {
+      position: absolute; bottom: 5px; left: 8px; font-size: 10px;
+      letter-spacing: 2px; color: #fff;
+      background: rgba(0,0,0,0.5);
+      padding: 1px 5px;
+      pointer-events: none; z-index: 5;
+    }
+
+    /* ── 시스템 메시지 영역 ── */
+    #system-log {
+      flex: 1; min-height: 0;
+      background: #000; border-top: 1px solid #0a180a;
+      padding: 8px 10px; overflow: hidden;
+      display: flex; flex-direction: column; justify-content: flex-end; gap: 3px;
+    }
+    .log-line {
+      font-size: 9px; letter-spacing: 1px; color: #00cc33;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      line-height: 1.5;
+      transition: color 0.3s;
+    }
+    .log-line.warn { color: #ff6600; }
+    .log-line.danger { color: #ff2222; }
+
+    /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+    /* ── 모바일 (720px 이하) ── */
+    /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+    @media (max-width: 720px) {
+      body { display: block; overflow: hidden; margin: 0; padding: 0; }
+      #ui-wrapper {
+        width: 100vw !important;
+        height: 100vh !important;
+        height: 100dvh !important;
+        position: relative !important;
+      }
+      #screen-camera {
+        flex-direction: column !important;
+        display: block !important;
+        height: 100vh !important;
+        height: 100dvh !important;
+        width: 100% !important;
+        position: relative !important;
+      }
+      #screen-camera.active { display: block !important; }
+
+      /* [1] 메인뷰 - 화면 최상단에 16:9로 고정 */
+      #main-view {
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        width: 100% !important;
+        height: calc(100vw * 9 / 16) !important;
+        min-height: 0 !important;
+        background: #000 !important;
+        overflow: visible !important;
+        z-index: 5;
+      }
+      #main-canvas, #main-static-canvas, #main-noise-canvas {
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: contain !important;
+      }
+      .main-cam-label {
+        font-size: 18px !important;
+        top: 8px !important;
+        left: 10px !important;
+      }
+
+      /* [2] 썸네일 2x2 + 시스템 로그 - 메인뷰 바로 아래 */
+      #side-panel {
+        display: grid !important;
+        grid-template-columns: 1fr 1fr !important;
+        grid-template-rows: auto auto auto !important;
+        position: absolute !important;
+        top: calc(100vw * 9 / 16) !important;
+        left: 0 !important;
+        right: 0 !important;
+        width: 100% !important;
+        height: auto !important;
+        min-height: 0 !important;
+        max-height: none !important;
+        flex: none !important;
+        border-left: none !important;
+        border-bottom: 1px solid #111;
+        background: #050508 !important;
+        z-index: 10;
+      }
+      .cam-thumb {
+        flex: none !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        height: auto !important;
+        min-height: 0 !important;
+        max-height: none !important;
+        aspect-ratio: 16 / 9 !important;
+        border-right: 1px solid #111 !important;
+        border-bottom: 1px solid #111 !important;
+      }
+      #thumb-2, #thumb-4 { border-right: none !important; }
+      #thumb-3, #thumb-4 { border-bottom: none !important; }
+      .cam-thumb-label { font-size: 11px !important; padding: 1px 5px !important; bottom: 4px !important; left: 6px !important; }
+
+      /* [3] 시스템 로그 - side-panel 안의 grid item으로 두 줄 차지 */
+      #system-log {
+        position: static !important;
+        grid-column: 1 / span 2 !important;
+        grid-row: 3 !important;
+        width: 100% !important;
+        height: auto !important;
+        max-height: none !important;
+        flex: none !important;
+        padding: 8px 10px !important;
+        background: #000 !important;
+        border-top: 1px solid #0a180a !important;
+        z-index: 5;
+      }
+      .log-line { font-size: 10px !important; line-height: 1.5 !important; }
+
+      /* [4] 셔터 버튼 - 화면 하단 fixed (남은 공간만큼 위에 여백) */
+      .shutter-btn {
+        position: fixed !important;
+        bottom: 24px !important;
+        left: 50% !important;
+        transform: translateX(-50%) !important;
+        top: auto !important;
+        margin: 0 !important;
+        width: 60px !important;
+        height: 60px !important;
+        z-index: 100;
+      }
+      .shutter-btn::after {
+        width: 46px !important;
+        height: 46px !important;
+      }
+      #dev-text {
+        position: fixed !important;
+        bottom: 96px !important;
+        left: 50% !important;
+        transform: translateX(-50%) !important;
+        top: auto !important;
+      }
+
+      #shutter-wrap { display: none !important; }
+
+      #music-btn {
+        top: 8px !important;
+        right: 8px !important;
+        font-size: 16px !important;
+      }
+
+      /* 결과 화면 (촬영 후) */
+      #screen-result {
+        position: absolute !important;
+        inset: 0 !important;
+        width: 100% !important;
+        height: 100vh !important;
+        height: 100dvh !important;
+        z-index: 200;
+      }
+      #screen-result.active {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 16px !important;
+        padding: 16px !important;
+      }
+      #result-img {
+        max-width: 95% !important;
+        max-height: 70% !important;
+      }
+      .result-btns {
+        display: flex !important;
+        gap: 12px !important;
+      }
+      .btn-result {
+        padding: 10px 20px !important;
+        font-size: 13px !important;
+      }
+    }
+    #screen-camera.glitch #main-canvas,
+    #screen-camera.glitch #main-static-canvas,
+    #screen-camera.glitch #main-noise-canvas {
+      transform: translateX(6px) skewX(-0.5deg);
+      filter: contrast(1.7) brightness(1.15) hue-rotate(8deg);
+    }
+    #screen-camera.glitch::before {
+      content: ''; position: absolute; inset: 0;
+      background: repeating-linear-gradient(0deg,rgba(255,255,255,0.08) 0px,rgba(255,255,255,0.08) 1px,transparent 2px,transparent 3px);
+      mix-blend-mode: overlay; pointer-events: none; z-index: 5;
+    }
+    #screen-camera.glitch-hard #main-canvas,
+    #screen-camera.glitch-hard #main-static-canvas,
+    #screen-camera.glitch-hard #main-noise-canvas {
+      transform: translate(-8px,3px);
+      filter: contrast(2.2) brightness(0.6) hue-rotate(-15deg) saturate(0.3);
+    }
+    #screen-camera.nosignal-glitch #main-view {
+      animation: nosignal-shake 0.05s infinite;
+    }
+    @keyframes nosignal-shake {
+      0%   { transform: translate(2px,0); }
+      25%  { transform: translate(-3px,1px); }
+      50%  { transform: translate(1px,-1px); }
+      75%  { transform: translate(-1px,2px); }
+      100% { transform: translate(2px,0); }
+    }
+
+    /* ── Result ── */
+    #screen-result { background: #000; gap: 16px; color: #7eb8ff; }
+    #result-img { max-width: 100%; max-height: 68%; object-fit: contain; opacity: 0; transition: opacity 1s; }
+    #result-img.visible { opacity: 1; }
+    .result-btns { display: flex; gap: 10px; }
+    .btn-result {
+      padding: 10px 20px; background: transparent; border: 1px solid #7eb8ff55;
+      color: #7eb8ff; font-family: monospace; font-size: 11px;
+      letter-spacing: 3px; cursor: pointer; transition: all 0.2s;
+    }
+    .btn-result:hover { border-color: #7eb8ffaa; background: #7eb8ff0d; }
+    .result-notice {
+      font-family: monospace; font-size: 10px; letter-spacing: 1px;
+      color: rgba(126,184,255,0.3); text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+<button id="music-btn" onclick="toggleMusic()" title="음악 on/off">♪</button>
+
+<!-- 인트로 오버레이 (ui-wrapper 바깥) -->
+<div id="intro-overlay">
+  <div id="intro-grid">
+    <img id="intro-s01" src="intro_s01.png" alt="">
+    <img id="intro-s02" src="intro_s02.png" alt="">
+    <img id="intro-s03" src="intro_s03.png" alt="">
+    <img id="intro-s04" src="intro_s04.png" alt="">
+    <img id="intro-s05" src="intro_s05.png" alt="">
+  </div>
+  <div id="intro-loading">01_CCTV_document.mov 를 로드합니다.</div>
+</div>
+
+<div id="ui-wrapper">
+
+  <!-- Screen 2: CCTV Monitor -->
+  <div id="screen-camera" class="screen active">
+    <video id="video" autoplay playsinline muted></video>
+
+    <!-- 좌측 메인뷰 -->
+    <div id="main-view">
+      <canvas id="main-canvas"></canvas>
+      <canvas id="main-static-canvas"></canvas>
+      <canvas id="main-noise-canvas"></canvas>
+      <div class="main-cam-label" id="main-cam-label">CAM 01</div>
+      <div id="main-timestamp" style="display:none!important"></div>
+      <div id="presence-overlay"></div>
+      <div id="loading-text">01_CCTV_document.mov 를 로드합니다.</div>
+      <div id="flash"></div>
+      <div id="dev-text">저장 중...</div>
+      <div id="shutter-tooltip">
+        <div id="tooltip-box">셔터를 눌러 현장조사를 시작하세요</div>
+        <svg id="tooltip-arrow" viewBox="0 0 12 7" xmlns="http://www.w3.org/2000/svg">
+          <polygon points="0,0 12,0 6,7" fill="rgba(0,8,20,0.85)"/>
+          <line x1="0" y1="0" x2="6" y2="7" stroke="#7eb8ff66" stroke-width="1"/>
+          <line x1="12" y1="0" x2="6" y2="7" stroke="#7eb8ff66" stroke-width="1"/>
+        </svg>
+      </div>
+      <div id="save-notice">촬영된 사진은 기기에만 저장됩니다</div>
+      <button class="shutter-btn" id="shutter-btn" onclick="onShutter()"></button>
+    </div>
+
+    <!-- 셔터 wrapper (모바일에서만 사용) -->
+    <div id="shutter-wrap"></div>
+
+    <!-- 우측 패널 -->
+    <div id="side-panel">
+      <!-- CAM 01 -->
+      <div class="cam-thumb" id="thumb-1" onclick="selectCam(1)">
+        <canvas id="thumb-canvas-1"></canvas>
+        <div class="cam-thumb-label">CAM 01</div>
+      </div>
+      <!-- CAM 02 -->
+      <div class="cam-thumb" id="thumb-2" onclick="selectCam(2)">
+        <canvas id="thumb-canvas-2"></canvas>
+        <div class="cam-thumb-label">CAM 02</div>
+      </div>
+      <!-- CAM 03 -->
+      <div class="cam-thumb" id="thumb-3" onclick="selectCam(3)">
+        <canvas id="thumb-canvas-3"></canvas>
+        <div class="cam-thumb-label">CAM 03</div>
+      </div>
+      <!-- CAM 04: 노이즈 -->
+      <div class="cam-thumb" id="thumb-4" onclick="selectCam(4)">
+        <canvas id="thumb-canvas-4"></canvas>
+        <div class="cam-thumb-label">CAM 04</div>
+      </div>
+
+      <!-- 시스템 로그 -->
+      <div id="system-log">
+        <div class="log-line" id="log-1">CAM 01 이상없음</div>
+        <div class="log-line" id="log-2">CAM 02 이상없음</div>
+        <div class="log-line" id="log-3">CAM 03 이상없음</div>
+        <div class="log-line" id="log-4">CAM 04 NO SIGNAL</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Screen 3 -->
+  <div id="screen-result" class="screen">
+    <div id="result-title"></div>
+    <img id="result-img" alt="captured">
+    <div class="result-btns">
+      <button class="btn-result" onclick="saveImage()">저장</button>
+      <button class="btn-result" onclick="retake()">다시 찍기</button>
+      <button class="btn-result" onclick="shareImage()">공유하기</button>
+    </div>
+    <div class="result-notice">촬영된 사진은 기기에만 저장됩니다</div>
+  </div>
+
+</div><!-- /ui-wrapper -->
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1.1675465747/selfie_segmentation.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js" crossorigin="anonymous"></script>
+<script>
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 배경음악 시스템
+// ══════════════════════════════════════════════════════════════════════════════
+// 배경음악 시스템 — 클릭 후 AudioContext unlock 방식
+// ══════════════════════════════════════════════════════════════════════════════
+const bgm = {
+  audio:   null,
+  muted:   false,
+  started: false,
+}
+
+function startBGM() {
+  if (bgm.started) return
+  bgm.started = true
+
+  // 1. 인트로 음악 먼저 재생 (한 번만)
+  const intro = document.createElement('audio')
+  intro.src    = 'intro_bgm.mp3'
+  intro.volume = 0.7
+  intro.muted  = bgm.muted
+  document.body.appendChild(intro)
+  bgm.audio = intro
+
+  const p = intro.play()
+  if (p) p.catch(e => {
+    console.warn('BGM 재생 실패:', e)
+    setTimeout(() => intro.play().catch(()=>{}), 1000)
+  })
+
+  // 2. 인트로 끝나면 replay 루프로 전환
+  intro.addEventListener('ended', () => {
+    intro.remove()
+    const replay = document.createElement('audio')
+    replay.src    = 'replay.mp3'
+    replay.loop   = true
+    replay.volume = 0.7
+    replay.muted  = bgm.muted
+    document.body.appendChild(replay)
+    bgm.audio = replay
+    replay.play().catch(()=>{})
+  })
+}
+
+function setBGMMute(muted) {
+  bgm.muted = muted
+  if (bgm.audio) bgm.audio.muted = muted
+  const btn = document.getElementById('music-btn')
+  if (btn) {
+    btn.textContent = muted ? '🔇' : '♪'
+    btn.style.opacity = muted ? '0.2' : '0.35'
+  }
+}
+
+function toggleMusic() {
+  const newMuted = !bgm.muted
+  bgm._userMuted = newMuted  // 사용자가 직접 설정한 값 기억
+  setBGMMute(newMuted)
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 인트로 시퀀스 — DOM 준비 후 실행
+// ══════════════════════════════════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded', function() {
+  const overlay  = document.getElementById('intro-overlay')
+  const grid     = document.getElementById('intro-grid')
+  const s03      = document.getElementById('intro-s03')
+  const loading  = document.getElementById('intro-loading')
+  const clickSfx = new Audio('click.mp3')
+  let   clicked  = false
+
+  if (!overlay || !grid || !s03) {
+    console.error('인트로 요소 없음:', {overlay, grid, s03})
+    startCamera()
+    return
+  }
+
+  // [1] 즉시 강한 글리치 1회
+  overlay.classList.add('intro-glitch-active')
+  setTimeout(() => overlay.classList.remove('intro-glitch-active'), 350)
+
+  // [2] 0.4초 후 그리드 페이드인 (BGM은 버튼 클릭 시점에 시작)
+  setTimeout(() => {
+    grid.classList.add('visible')
+  }, 400)
+
+  // 호버
+  s03.addEventListener('mouseenter', () => { if (!clicked) s03.src = 'intro_s03_hover.png' })
+  s03.addEventListener('mouseleave', () => { if (!clicked) s03.src = 'intro_s03.png' })
+
+  // 클릭 — 사용자 제스처 컨텍스트에서 모든 오디오 시작
+  s03.addEventListener('click', () => {
+    if (clicked) return
+    clicked = true
+
+    // 클릭 효과음
+    clickSfx.currentTime = 0
+    clickSfx.play().catch(()=>{})
+
+    // BGM — 사용자 클릭 컨텍스트에서 직접 호출 (필수)
+    startBGM()
+
+    s03.src = 'intro_s03_hover.png'
+    s03.style.cursor = 'default'
+    setTimeout(() => {
+      overlay.classList.add('fade-out')
+      startCamera()
+      setTimeout(() => {
+        overlay.style.display = 'none'
+        document.getElementById('ui-wrapper').classList.add('fadein')
+      }, 650)
+    }, 1000)
+  })
+
+  // 터치
+  s03.addEventListener('touchstart', () => {
+    if (!clicked) s03.src = 'intro_s03_hover.png'
+  }, { passive: true })
+})
+
+
+// ── 레이아웃 상수 ──────────────────────────────────────────────────────────────
+const SIDE_W = 220   // 기준 사이드 너비
+const UI_W   = 1180  // 기준 전체 너비 (960 + 220)
+const UI_H   = 540   // 기준 높이
+
+// 썸네일 비율 (이미지 로드 후 갱신)
+const thumbAspect = { 1: 16/9, 2: 16/9, 3: 16/9, 4: 16/9 }
+
+function fitUI() {
+  const wrapper = document.getElementById('ui-wrapper')
+  const panel   = document.getElementById('side-panel')
+  const screen  = document.getElementById('screen-camera')
+  const log     = document.getElementById('system-log')
+  const mainView = document.getElementById('main-view')
+  const shutter  = document.getElementById('shutter-btn')
+
+  const isMobile = window.innerWidth <= 720
+
+  if (isMobile) {
+    // 모든 인라인 사이즈 스타일 제거 → CSS 미디어쿼리에 위임
+    [wrapper, panel, mainView, log].forEach(el => {
+      if (!el) return
+      el.style.width = ''
+      el.style.height = ''
+      el.style.minWidth = ''
+      el.style.minHeight = ''
+      el.style.maxWidth = ''
+      el.style.maxHeight = ''
+      el.style.flex = ''
+    })
+    ;[1,2,3,4].forEach(n => {
+      const el = document.getElementById(`thumb-${n}`)
+      if (el) {
+        el.style.height = ''
+        el.style.minHeight = ''
+        el.style.maxHeight = ''
+        el.style.width = ''
+      }
+    })
+    return
+  }
+
+  // 데스크탑: letterbox 스케일링
+  const scale   = Math.min(window.innerWidth / UI_W, window.innerHeight / UI_H)
+  const totalH  = Math.round(UI_H * scale)
+  const totalW  = Math.round(UI_W * scale)
+  wrapper.style.width  = totalW + 'px'
+  wrapper.style.height = totalH + 'px'
+
+  const sideW   = Math.round(SIDE_W * scale)
+  panel.style.width  = sideW + 'px'
+  panel.style.height = totalH + 'px'
+
+  const LOG_MIN = 60
+  const idealH = [1,2,3,4].map(n => Math.round(sideW / thumbAspect[n]))
+  const sumIdeal = idealH.reduce((s,v) => s+v, 0)
+  const maxForThumbs = totalH - LOG_MIN - 4
+  const tRatio = sumIdeal > maxForThumbs ? maxForThumbs / sumIdeal : 1
+
+  ;[1,2,3,4].forEach((n, i) => {
+    const el = document.getElementById(`thumb-${n}`)
+    if (!el) return
+    const h = Math.round(idealH[i] * tRatio)
+    el.style.height    = h + 'px'
+    el.style.minHeight = h + 'px'
+    el.style.maxHeight = h + 'px'
+  })
+}
+window.addEventListener('resize', fitUI)
+document.addEventListener('DOMContentLoaded', fitUI)
+
+// ── Ghost images ───────────────────────────────────────────────────────────────
+const ghostImages = []
+const ghostNormal = new Image()
+ghostNormal.src = 'ghost_normal.png'
+
+function loadGhostImage(src) {
+  return new Promise(r => {
+    const img = new Image()
+    img.onload  = () => { if (img.naturalWidth > 0) ghostImages.push(img); r() }
+    img.onerror = () => r()
+    img.src = src
+  })
+}
+;(async () => {
+  await loadGhostImage('ghost.png')
+  for (let i = 1; i <= 10; i++) await loadGhostImage(`ghost${i}.png`)
+  console.log(`[Ghost Cam] 귀신: ${ghostImages.length}개`)
+})()
+function pickRandomGhost() {
+  return ghostImages.length ? ghostImages[Math.floor(Math.random() * ghostImages.length)] : null
+}
+
+// ── 정적 이미지 preload ────────────────────────────────────────────────────────
+const cam2On  = new Image(); cam2On.src  = 'cam2on.png'
+const cam2Off = new Image(); cam2Off.src = 'cam2off.png'
+const cam3Img = new Image(); cam3Img.src = 'cam3.png'
+
+// 실제 비율 반영
+;[cam2On, cam2Off].forEach(img => {
+  img.onload = () => {
+    if (img.naturalWidth && img.naturalHeight) {
+      thumbAspect[2] = img.naturalWidth / img.naturalHeight
+      fitUI()
+    }
+  }
+})
+cam3Img.onload = () => {
+  if (cam3Img.naturalWidth && cam3Img.naturalHeight) {
+    thumbAspect[3] = cam3Img.naturalWidth / cam3Img.naturalHeight
+    fitUI()
+  }
+}
+
+// ── State ──────────────────────────────────────────────────────────────────────
+const state = {
+  video: null, canvas: null, ctx: null,
+  maskCanvas: null, maskCtx: null,
+  segmentation: null, lastSegResults: null,
+  scanlineOffset: 0, staticScanOffset: 0,
+  isCapturing: false, lastDataURL: null, ready: false,
+  currentCam: 1,
+  cam2IsOn: true,
+  cam3IsOpen: false,
+  staticCanvasRaf: null,
+  mainNoiseRaf: null,
+  cam4Audio: null,
+  noSignalActive: false,
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'))
+  document.getElementById(id).classList.add('active')
+}
+
+// ── CAM 선택 ──────────────────────────────────────────────────────────────────
+// ── 효과음 ────────────────────────────────────────────────────────────────────
+const sfxTrans  = new Audio('cctv_trans.mp3')
+const sfxCamera = new Audio('camera_sound.mp3')
+
+function playSfx(sfx) {
+  try { sfx.currentTime = 0; sfx.play().catch(()=>{}) } catch(e) {}
+}
+
+function selectCam(n) {
+  // CAM1 제외 서브캠 클릭 시 효과음
+  if (n !== state.currentCam) playSfx(sfxTrans)
+
+  state.currentCam = n
+  document.getElementById('main-cam-label').textContent = `CAM 0${n}`
+
+  // CAM02/03일 때 셔터 무채색
+  const mainView = document.getElementById('main-view')
+  mainView.classList.toggle('cam-static', n === 2 || n === 3)
+
+  // save-notice CAM01일 때만 표시
+  const saveNotice = document.getElementById('save-notice')
+  if (saveNotice) saveNotice.classList.toggle('visible', n === 1)
+
+  // CAM4 → 음소거, 다른 캠 → 사용자가 직접 끈 경우에만 유지
+  if (n === 4) {
+    bgm._cam4Muted = true
+    setBGMMute(true)
+  } else {
+    bgm._cam4Muted = false
+    // 사용자가 직접 음소거한 게 아니면 소리 복구
+    setBGMMute(bgm._userMuted || false)
+  }
+
+  const mc  = document.getElementById('main-canvas')
+  const msc = document.getElementById('main-static-canvas')
+  const mnc = document.getElementById('main-noise-canvas')
+  const shutter = document.getElementById('shutter-btn')
+
+  // 모두 숨기기
+  mc.style.display  = 'none'
+  msc.style.display = 'none'
+  mnc.style.display = 'none'
+  stopStaticRender()
+  stopMainNoise()
+
+  shutter.classList.toggle('hidden', n === 4)
+
+  // 타임스탬프 표시/숨김
+  if (typeof updateMainTimestamp === 'function') updateMainTimestamp()
+
+  if (n === 1) {
+    mc.style.display = 'block'
+  } else if (n === 2 || n === 3) {
+    msc.style.display = 'block'
+    startStaticRender(n)
+  } else if (n === 4) {
+    mnc.style.display = 'block'
+    startMainNoise()
+  }
+}
+
+// ── 정적 채널 메인뷰 렌더 (CAM02 / CAM03) ────────────────────────────────────
+function stopStaticRender() {
+  if (state.staticCanvasRaf) { cancelAnimationFrame(state.staticCanvasRaf); state.staticCanvasRaf = null }
+}
+
+function startStaticRender(camNum) {
+  stopStaticRender()
+  const sc  = document.getElementById('main-static-canvas')
+  const ctx = sc.getContext('2d', { willReadFrequently: true })
+
+  function render() {
+    const dpr = window.devicePixelRatio || 1
+    const cssW = sc.offsetWidth  || 960
+    const cssH = sc.offsetHeight || 540
+    if (sc.width !== cssW * dpr || sc.height !== cssH * dpr) {
+      sc.width  = cssW * dpr
+      sc.height = cssH * dpr
+      sc.style.width  = cssW + 'px'
+      sc.style.height = cssH + 'px'
+    }
+    const w = sc.width, h = sc.height
+    const src = camNum === 2 ? (state.cam2IsOn ? cam2On : cam2Off)
+              : (state.cam3IsOpen ? cam3OpenVideo : cam3Img)
+    const isVideo = camNum === 3 && state.cam3IsOpen
+    const ready = isVideo ? src.readyState >= 2 : (src.complete && src.naturalWidth > 0)
+    if (ready) {
+      // 검정 배경
+      ctx.fillStyle = '#000'
+      ctx.fillRect(0, 0, w, h)
+
+      // 원본 비율 유지하며 letterbox/pillarbox
+      const srcW = src.naturalWidth || src.videoWidth
+      const srcH = src.naturalHeight || src.videoHeight
+      if (srcW > 0 && srcH > 0) {
+        const srcAspect  = srcW / srcH
+        const destAspect = w / h
+        let dw, dh, dx, dy
+        if (srcAspect > destAspect) {
+          // 가로가 더 긴 영상 → 가로 채우고 위아래 검정
+          dw = w
+          dh = w / srcAspect
+          dx = 0
+          dy = (h - dh) / 2
+        } else {
+          // 세로가 더 긴 영상 → 세로 채우고 좌우 검정
+          dh = h
+          dw = h * srcAspect
+          dx = (w - dw) / 2
+          dy = 0
+        }
+        ctx.drawImage(src, dx, dy, dw, dh)
+      }
+      applyStaticFilter(ctx, w, h)
+    }
+    state.staticCanvasRaf = requestAnimationFrame(render)
+  }
+  render()
+}
+
+// ── CAM04 메인뷰 노이즈 + 치지직 오디오 ─────────────────────────────────────
+function stopMainNoise() {
+  if (state.mainNoiseRaf) { cancelAnimationFrame(state.mainNoiseRaf); state.mainNoiseRaf = null }
+  if (state.cam4Audio) { try { state.cam4Audio.stop() } catch(e){} ; state.cam4Audio = null }
+}
+
+function startMainNoise() {
+  stopMainNoise()
+
+  // 치지직 오디오
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+    const bufSize  = 2 * audioCtx.sampleRate
+    const buf      = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate)
+    const out      = buf.getChannelData(0)
+    for (let i = 0; i < bufSize; i++) out[i] = Math.random() * 2 - 1
+    const src  = audioCtx.createBufferSource()
+    src.buffer = buf; src.loop = true
+    const gain = audioCtx.createGain(); gain.gain.value = 0.12
+    src.connect(gain); gain.connect(audioCtx.destination); src.start()
+    state.cam4Audio = src
+  } catch(e) {}
+
+  const nc  = document.getElementById('main-noise-canvas')
+  const ctx = nc.getContext('2d')
+
+  function render() {
+    nc.width  = nc.offsetWidth  || 960
+    nc.height = nc.offsetHeight || 540
+    const w = nc.width, h = nc.height
+
+    // 컬러 노이즈 — 어둡게 (밝기 낮춤)
+    const id = ctx.createImageData(w, h)
+    for (let i = 0; i < id.data.length; i += 4) {
+      id.data[i]   = Math.random() * 160  // 어둡게: 255 → 160
+      id.data[i+1] = Math.random() * 160
+      id.data[i+2] = Math.random() * 160
+      id.data[i+3] = 255
+    }
+    ctx.putImageData(id, 0, 0)
+
+    // NO SIGNAL 텍스트 — 중앙, 오버레이 박스
+    const fs = Math.max(14, Math.round(w * 0.022))
+    ctx.font = `bold ${fs}px monospace`
+    ctx.textAlign = 'center'
+    const textW = ctx.measureText('NO  SIGNAL').width
+    const textH = fs
+    const tx = w / 2, ty = h / 2
+    // 배경 박스
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'
+    ctx.fillRect(tx - textW/2 - 12, ty - textH - 4, textW + 24, textH + 16)
+    // 텍스트
+    ctx.fillStyle = '#ff3333'
+    ctx.shadowColor = '#ff3333'
+    ctx.shadowBlur = 10
+    ctx.fillText('NO  SIGNAL', tx, ty)
+    ctx.shadowBlur = 0
+    ctx.textAlign = 'left'
+
+    state.mainNoiseRaf = requestAnimationFrame(render)
+  }
+  render()
+}
+
+// ── 썸네일 렌더 루프들 ─────────────────────────────────────────────────────────
+// 핵심: canvas의 width/height attribute = 이미지 원본 해상도 (비율 고정)
+//        CSS width/height = 실제 표시 크기 (fitUI가 부모로 제어)
+function startThumbRenderers() {
+
+  // CAM02 썸네일
+  ;(function renderThumb2() {
+    const tc  = document.getElementById('thumb-canvas-2')
+    const ctx = tc.getContext('2d', { willReadFrequently: true })
+    // 캔버스 내부 해상도를 이미지 원본으로 고정
+    function setSize() {
+      if (cam2On.naturalWidth) {
+        tc.width  = cam2On.naturalWidth
+        tc.height = cam2On.naturalHeight
+      } else {
+        tc.width = 320; tc.height = 180
+      }
+    }
+    setSize()
+    function tick() {
+      const src = state.cam2IsOn ? cam2On : cam2Off
+      if (src.complete && src.naturalWidth > 0) {
+        if (tc.width !== src.naturalWidth) { tc.width = src.naturalWidth; tc.height = src.naturalHeight }
+        ctx.drawImage(src, 0, 0, tc.width, tc.height)
+        applyStaticFilter(ctx, tc.width, tc.height, true)
+      }
+      requestAnimationFrame(tick)
+    }
+    tick()
+  })()
+
+  // CAM03 썸네일
+  ;(function renderThumb3() {
+    const tc  = document.getElementById('thumb-canvas-3')
+    const ctx = tc.getContext('2d', { willReadFrequently: true })
+    function setSize(src) {
+      const w = src.naturalWidth || src.videoWidth || 320
+      const h = src.naturalHeight || src.videoHeight || 180
+      if (w) { tc.width = w; tc.height = h }
+      else { tc.width = 320; tc.height = 180 }
+    }
+    setSize(cam3Img)
+    function tick() {
+      if (state.cam3IsOpen) {
+        // 비디오 소스
+        if (cam3OpenVideo.readyState >= 2) {
+          if (tc.width !== cam3OpenVideo.videoWidth && cam3OpenVideo.videoWidth > 0) {
+            tc.width = cam3OpenVideo.videoWidth; tc.height = cam3OpenVideo.videoHeight
+          }
+          ctx.drawImage(cam3OpenVideo, 0, 0, tc.width, tc.height)
+          applyStaticFilter(ctx, tc.width, tc.height, true)
+        }
+      } else {
+        if (cam3Img.complete && cam3Img.naturalWidth > 0) {
+          if (tc.width !== cam3Img.naturalWidth) { tc.width = cam3Img.naturalWidth; tc.height = cam3Img.naturalHeight }
+          ctx.drawImage(cam3Img, 0, 0, tc.width, tc.height)
+          applyStaticFilter(ctx, tc.width, tc.height, true)
+        }
+      }
+      requestAnimationFrame(tick)
+    }
+    tick()
+  })()
+
+  // CAM04 썸네일 (컬러 노이즈) — 16:9 고정
+  ;(function renderThumb4() {
+    const tc  = document.getElementById('thumb-canvas-4')
+    const ctx = tc.getContext('2d')
+    tc.width = 320; tc.height = 180
+    function tick() {
+      const w = tc.width, h = tc.height
+      const id = ctx.createImageData(w, h)
+      for (let i = 0; i < id.data.length; i += 4) {
+        id.data[i]   = Math.random() * 150
+        id.data[i+1] = Math.random() * 150
+        id.data[i+2] = Math.random() * 150
+        id.data[i+3] = 255
+      }
+      ctx.putImageData(id, 0, 0)
+      // NO SIGNAL 텍스트 — 중앙
+      const fs = Math.max(7, Math.round(w * 0.07))
+      ctx.font = `bold ${fs}px monospace`
+      ctx.textAlign = 'center'
+      const textW = ctx.measureText('NO  SIGNAL').width
+      ctx.fillStyle = 'rgba(0,0,0,0.5)'
+      ctx.fillRect(w/2 - textW/2 - 4, h/2 - fs - 2, textW + 8, fs + 10)
+      ctx.fillStyle = '#ff3333'
+      ctx.shadowColor = '#ff3333'
+      ctx.shadowBlur = 6
+      ctx.fillText('NO  SIGNAL', w / 2, h / 2)
+      ctx.shadowBlur = 0
+      ctx.textAlign = 'left'
+      requestAnimationFrame(tick)
+    }
+    tick()
+  })()
+}
+
+// ── CAM02 깜빡 ────────────────────────────────────────────────────────────────
+function startCam2Flicker() {
+  async function scheduleNext() {
+    await sleep(10000 + Math.random() * 5000)
+    const times = 2 + Math.floor(Math.random() * 3)
+    for (let i = 0; i < times; i++) {
+      state.cam2IsOn = false
+      await sleep(60 + Math.random() * 100)
+      state.cam2IsOn = true
+      await sleep(50 + Math.random() * 80)
+    }
+    // 깜빡 후 로그 업데이트
+    updateLog(2, 'warn', 'CAM 02 [주의] 이상현상 감지')
+    await sleep(4000 + Math.random() * 3000)
+    updateLog(2, '', 'CAM 02 이상없음')
+    state.cam2IsOn = Math.random() > 0.3
+    scheduleNext()
+  }
+  scheduleNext()
+}
+
+// ── CAM03 교차 (cam3.png ↔ cam3_open.mp4 비디오) ─────────────────────────────
+const cam3OpenVideo = document.createElement('video')
+cam3OpenVideo.src  = 'cam3_open.mp4'
+cam3OpenVideo.loop = true
+cam3OpenVideo.muted = true
+cam3OpenVideo.playsInline = true
+cam3OpenVideo.preload = 'auto'
+
+function setCam3Open(isOpen) {
+  state.cam3IsOpen = isOpen
+  if (isOpen) {
+    cam3OpenVideo.play().catch(()=>{})
+  } else {
+    cam3OpenVideo.pause()
+    cam3OpenVideo.currentTime = 0
+  }
+}
+
+function startCam3Switch() {
+  async function scheduleNext() {
+    await sleep(8000 + Math.random() * 12000)
+    const times = 2 + Math.floor(Math.random() * 3)
+    for (let i = 0; i < times; i++) {
+      setCam3Open(!state.cam3IsOpen)
+      await sleep(80 + Math.random() * 150)
+      setCam3Open(!state.cam3IsOpen)
+      await sleep(60 + Math.random() * 100)
+    }
+    setCam3Open(Math.random() > 0.5)
+    scheduleNext()
+  }
+  scheduleNext()
+}
+
+// ── 시스템 로그 ───────────────────────────────────────────────────────────────
+function updateLog(camNum, cls, msg) {
+  const el = document.getElementById(`log-${camNum}`)
+  if (!el) return
+  el.className = 'log-line' + (cls ? ' ' + cls : '')
+  el.textContent = msg
+}
+
+function startLogSystem() {
+  // CAM01 랜덤 이상현상
+  ;(async function cam1Loop() {
+    while (true) {
+      await sleep(15000 + Math.random() * 20000)
+      updateLog(1, 'warn', 'CAM 01 [주의] 이상현상 감지')
+      await sleep(3000 + Math.random() * 4000)
+      updateLog(1, '', 'CAM 01 이상없음')
+    }
+  })()
+
+  // CAM03 랜덤 오렌지 경고
+  ;(async function cam3Loop() {
+    while (true) {
+      await sleep(18000 + Math.random() * 25000)
+      updateLog(3, 'warn', 'CAM 03 [주의] 오렌지를 조심하세요.')
+      await sleep(4000 + Math.random() * 3000)
+      updateLog(3, '', 'CAM 03 이상없음')
+    }
+  })()
+
+  // 전체 동시 경고 (랜덤, 드물게)
+  ;(async function allAlertLoop() {
+    while (true) {
+      await sleep(30000 + Math.random() * 40000)
+      const msg = '[주의][주의] 절대 뒤를 보지 마세요'
+      updateLog(1, 'danger', `CAM 01 ${msg}`)
+      updateLog(2, 'danger', `CAM 02 ${msg}`)
+      updateLog(3, 'danger', `CAM 03 ${msg}`)
+      updateLog(4, 'danger', `CAM 04 ${msg}`)
+      await sleep(3000 + Math.random() * 2000)
+      updateLog(1, '', 'CAM 01 이상없음')
+      updateLog(2, '', 'CAM 02 이상없음')
+      updateLog(3, '', 'CAM 03 이상없음')
+      updateLog(4, 'warn', 'CAM 04 NO SIGNAL')
+    }
+  })()
+}
+
+// ── NO SIGNAL (CAM04 클릭 시 메인뷰에 노이즈) — 이미 selectCam(4)가 처리 ──
+
+// ── Camera init ────────────────────────────────────────────────────────────────
+async function startCamera() {
+  showScreen('screen-camera')
+  fitUI()
+
+  state.video  = document.getElementById('video')
+  state.canvas = document.getElementById('main-canvas')
+  state.ctx    = state.canvas.getContext('2d', { willReadFrequently: true })
+
+  let stream
+  try {
+    const isMobile = window.innerWidth <= 720
+    const idealW = isMobile ? 640 : 1280
+    const idealH = isMobile ? 360 : 720
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: 'user',
+        width:  { ideal: idealW },
+        height: { ideal: idealH },
+        aspectRatio: { ideal: 16/9 }
+      },
+      audio: false,
+    })
+  } catch (e) {
+    document.getElementById('loading-text').textContent = '카메라 권한이 필요합니다.'
+    return
+  }
+
+  state.video.srcObject = stream
+  await new Promise(r => { state.video.onloadedmetadata = r })
+  await state.video.play()
+
+  // 비디오 원본 크기
+  const vw = state.video.videoWidth, vh = state.video.videoHeight
+
+  // 캔버스는 16:9 비율로 강제 (비디오가 4:3이어도 그 안에 맞춰서 그림)
+  const targetAspect = 16 / 9
+  let cw, ch
+  if (vw / vh >= targetAspect) {
+    // 비디오가 가로로 더 김 → 가로 자르기
+    ch = vh
+    cw = Math.round(vh * targetAspect)
+  } else {
+    // 비디오가 세로로 더 김 (4:3 등) → 세로 자르기
+    cw = vw
+    ch = Math.round(vw / targetAspect)
+  }
+  state.canvas.width  = cw
+  state.canvas.height = ch
+  state.videoOrigW = vw
+  state.videoOrigH = vh
+  const w = cw, h = ch
+
+  // CAM01 썸네일 캔버스: 16:9로 동일하게
+  const tc1 = document.getElementById('thumb-canvas-1')
+  tc1.width  = cw
+  tc1.height = ch
+
+  state.maskCanvas = document.createElement('canvas')
+  state.maskCanvas.width = cw; state.maskCanvas.height = ch
+  state.maskCtx = state.maskCanvas.getContext('2d')
+
+  // CAM01 라이브 보이기
+  state.canvas.style.display = 'block'
+
+  initSegmentation()
+  startGlitchTimer()
+  startCam2Flicker()
+  startCam3Switch()
+  startThumbRenderers()
+  startLogSystem()
+}
+
+// ── Glitch 타이머 ─────────────────────────────────────────────────────────────
+function startGlitchTimer() {
+  const screen = document.getElementById('screen-camera')
+  setInterval(() => {
+    if (state.noSignalActive) return
+    const r = Math.random()
+    if (r < 0.04) {
+      screen.classList.add('glitch-hard')
+      setTimeout(() => screen.classList.remove('glitch-hard'), 80 + Math.random() * 60)
+    } else if (r < 0.18) {
+      screen.classList.add('glitch')
+      setTimeout(() => screen.classList.remove('glitch'), 80 + Math.random() * 80)
+    }
+  }, 700)
+}
+
+// ── MediaPipe ─────────────────────────────────────────────────────────────────
+function initSegmentation() {
+  const seg = new SelfieSegmentation({
+    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1.1675465747/${f}`,
+  })
+  seg.setOptions({ modelSelection: 1 })
+  seg.onResults(onSegResults)
+  state.segmentation = seg
+  sendFrame()
+}
+
+function sendFrame() {
+  if (state.video && state.video.readyState >= 2)
+    state.segmentation.send({ image: state.video })
+  else
+    requestAnimationFrame(sendFrame)
+}
+
+function onSegResults(results) {
+  state.lastSegResults = results
+  if (!state.ready) {
+    document.getElementById('loading-text').style.display = 'none'
+    state.ready = true
+    startTooltipTimer()
+    const sn = document.getElementById('save-notice')
+    if (sn) sn.classList.add('visible')
+    initFaceMesh()
+    startPresenceSystem()
+  }
+  drawFrame(results)
+  requestAnimationFrame(sendFrame)
+}
+
+// ── Live view ─────────────────────────────────────────────────────────────────
+function drawFrame(results) {
+  const { canvas, ctx, maskCanvas, maskCtx } = state
+  const w = canvas.width, h = canvas.height
+  const vw = state.videoOrigW || results.image.width  || w
+  const vh = state.videoOrigH || results.image.height || h
+
+  // 비디오를 캔버스에 cover로 그리기 (비율 유지하며 채우기, 잘림 허용)
+  const canvasAspect = w / h
+  const videoAspect = vw / vh
+  let sx, sy, sw, sh
+  if (videoAspect > canvasAspect) {
+    // 비디오가 가로로 더 김 → 좌우 자르기
+    sh = vh
+    sw = vh * canvasAspect
+    sx = (vw - sw) / 2
+    sy = 0
+  } else {
+    // 비디오가 세로로 더 김 → 위아래 자르기
+    sw = vw
+    sh = vw / canvasAspect
+    sx = 0
+    sy = (vh - sh) / 2
+  }
+
+  ctx.save()
+  ctx.translate(w, 0); ctx.scale(-1, 1)
+  ctx.drawImage(results.image, sx, sy, sw, sh, 0, 0, w, h)
+  ctx.restore()
+
+  drawMaskedPerson(maskCtx, maskCanvas, ctx, results, w, h, sx, sy, sw, sh)
+
+  // CCTV 필터 (타임스탬프 없이)
+  applyCCTVFilter(ctx, w, h, false)
+
+  // CAM01 썸네일: 타임스탬프 없는 상태로 복사
+  const tc1  = document.getElementById('thumb-canvas-1')
+  const tctx = tc1.getContext('2d')
+  tctx.drawImage(canvas, 0, 0, tc1.width, tc1.height)
+
+  // CAM01 타임스탬프 — w<400 체크 없이 직접 그리기
+  {
+    const now=new Date()
+    const mo=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][now.getMonth()]
+    const dd=String(now.getDate()).padStart(2,'0'),yr=now.getFullYear()
+    let hh=now.getHours(); const ap=hh>=12?'PM':'AM'; hh=hh%12||12
+    const mm=String(now.getMinutes()).padStart(2,'0'),ss=String(now.getSeconds()).padStart(2,'0')
+    const sc=h/720, fs=Math.round(18*sc), px=Math.round(22*sc)
+    ctx.font=`${fs}px monospace`; ctx.fillStyle='#7eb8ff'
+    ctx.shadowColor='#7eb8ff'; ctx.shadowBlur=5
+    ctx.fillText(`${mo} ${dd} ${yr}`,px,h-Math.round(42*sc))
+    ctx.fillText(`${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`,px,h-Math.round(16*sc))
+    ctx.shadowBlur=0
+  }
+}
+
+function updateMainTimestamp() {
+  const el = document.getElementById('main-timestamp')
+  if (!el) return
+  // CAM01일 때만 표시
+  if (state.currentCam !== 1) {
+    el.classList.remove('visible')
+    return
+  }
+  const now = new Date()
+  const mo = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][now.getMonth()]
+  const dd = String(now.getDate()).padStart(2,'0')
+  const yr = now.getFullYear()
+  let hh = now.getHours()
+  const ap = hh >= 12 ? 'PM' : 'AM'
+  hh = hh % 12 || 12
+  const mm = String(now.getMinutes()).padStart(2,'0')
+  const ss = String(now.getSeconds()).padStart(2,'0')
+  el.textContent = `${mo} ${dd} ${yr}\n${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`
+  el.classList.add('visible')
+}
+
+// ── Masked person ─────────────────────────────────────────────────────────────
+function drawMaskedPerson(maskCtx, maskCanvas, targetCtx, results, w, h, sx, sy, sw, sh) {
+  // 기본값 (옛 호출 호환)
+  if (sx === undefined) { sx = 0; sy = 0; sw = results.image.width || w; sh = results.image.height || h }
+  maskCtx.clearRect(0,0,w,h)
+  maskCtx.save(); maskCtx.translate(w,0); maskCtx.scale(-1,1)
+  maskCtx.drawImage(results.segmentationMask, sx, sy, sw, sh, 0, 0, w, h)
+  maskCtx.restore()
+  maskCtx.globalCompositeOperation='source-in'
+  maskCtx.save(); maskCtx.translate(w,0); maskCtx.scale(-1,1)
+  maskCtx.drawImage(results.image, sx, sy, sw, sh, 0, 0, w, h)
+  maskCtx.restore()
+  maskCtx.globalCompositeOperation='source-over'
+  targetCtx.drawImage(maskCanvas,0,0)
+}
+
+// ── Person bounds ─────────────────────────────────────────────────────────────
+function getPersonBounds(segMask, srcW, srcH) {
+  const tmp = document.createElement('canvas')
+  tmp.width=srcW; tmp.height=srcH
+  const tc=tmp.getContext('2d'); tc.drawImage(segMask,0,0,srcW,srcH)
+  const data=tc.getImageData(0,0,srcW,srcH).data
+  let minX=srcW,maxX=0,minY=srcH,maxY=0,count=0
+  const step=4
+  for(let y=0;y<srcH;y+=step) for(let x=0;x<srcW;x+=step)
+    if(data[(y*srcW+x)*4]>128){ if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;count++ }
+  if(minX>=maxX||count<200) return null
+  const headBottom=minY+(maxY-minY)*0.25
+  let faceMinX=srcW,faceMaxX=0
+  for(let y=minY;y<headBottom;y+=step) for(let x=0;x<srcW;x+=step)
+    if(data[(y*srcW+x)*4]>128){ if(x<faceMinX)faceMinX=x;if(x>faceMaxX)faceMaxX=x }
+  if(faceMinX>=faceMaxX){faceMinX=minX;faceMaxX=maxX}
+  return{minX,maxX,minY,maxY,faceMinX,faceMaxX,headBottom}
+}
+
+// ── Ghost placement ───────────────────────────────────────────────────────────
+function computeGhostPlacement(pb,w,h,ghost){
+  const aspect=(ghost&&ghost.naturalWidth&&ghost.naturalHeight)?ghost.naturalHeight/ghost.naturalWidth:2.2
+  if(!pb){const gw=w*0.25;return{gx:w*0.55,gy:h*0.10,gw,gh:gw*aspect}}
+  const fL=w-pb.faceMaxX,fR=w-pb.faceMinX
+  const fCY=(pb.minY+pb.headBottom)/2
+  const fW=fR-fL,fH=pb.headBottom-pb.minY
+  const pL=w-pb.maxX,pR=w-pb.minX
+  const gw=Math.min(Math.max(fW*2.5,w*0.26),w*0.34)*(1.0+Math.random()*0.2)
+  const gh=gw*aspect
+  const sR=w-pR,sL=pL
+  const side=(sR>gw*0.5&&sL>gw*0.5)?(Math.random()<0.5?'right':'left'):(sR>=sL?'right':'left')
+  const ov=gw*0.05*Math.random()
+  const tx=side==='right'?pR+gw*0.25-ov:pL-gw*0.25+ov
+  let gx=tx-gw/2, gy=fCY+(Math.random()-0.4)*fH*0.7-gh*0.13
+  const m=w*0.01
+  gx=Math.max(m-gw*0.10,Math.min(w-m-gw*0.90,gx))
+  gy=Math.max(m,Math.min(h-m-gh*0.30,gy))
+  return{gx,gy,gw,gh}
+}
+
+// ── CCTV Filter ───────────────────────────────────────────────────────────────
+function applyCCTVFilter(ctx,w,h){
+  const id=ctx.getImageData(0,0,w,h),d=id.data
+  for(let i=0;i<d.length;i+=4){
+    const r=d[i], g=d[i+1], b=d[i+2]
+    d[i]  = Math.min(r*0.18 + 5,  255)
+    d[i+1]= Math.min(g*0.32 + 5,  255)
+    d[i+2]= Math.min(b*1.35 + 22, 255)
+  }
+  ctx.putImageData(id,0,0)
+  const scale = h / 720
+
+  // 검정 스캔라인 (CAM02/03과 동일 방식)
+  const lineH  = Math.max(1, Math.round(2 * scale))
+  const lineGap = Math.max(2, Math.round(4 * scale))
+  state.scanlineOffset=(state.scanlineOffset+0.9*scale)%h
+  ctx.fillStyle='rgba(0,0,0,0.30)'
+  for(let y=0;y<h;y+=lineGap) ctx.fillRect(0,(y+state.scanlineOffset)%h,w,lineH)
+
+  // 흰색 노이즈 (CAM02/03과 동일)
+  const nc=Math.round(2400*(w*h)/(1280*720))
+  const dotS = Math.max(1, Math.round(scale))
+  ctx.fillStyle='rgba(255,255,255,0.18)'
+  for(let i=0;i<nc;i++) ctx.fillRect(Math.random()*w,Math.random()*h,dotS,dotS)
+
+  // 비네팅
+  const vg=ctx.createRadialGradient(w/2,h/2,h*0.18,w/2,h/2,h*0.88)
+  vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,10,0.82)')
+  ctx.fillStyle=vg; ctx.fillRect(0,0,w,h)
+}
+
+// ── 타임스탬프 (메인뷰 전용) ─────────────────────────────────────────────────
+function applyCCTVTimestamp(ctx, w, h, color) {
+  // 썸네일(작은 캔버스)에서는 타임스탬프 숨김
+  if (w < 400) return
+  const now=new Date()
+  const mo=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][now.getMonth()]
+  const dd=String(now.getDate()).padStart(2,'0'),yr=now.getFullYear()
+  let hh=now.getHours(); const ap=hh>=12?'PM':'AM'; hh=hh%12||12
+  const mm=String(now.getMinutes()).padStart(2,'0'),ss=String(now.getSeconds()).padStart(2,'0')
+  const scale=h/720,fs=Math.round(18*scale)
+  const c = color || '#7eb8ff'
+  const padX = Math.round(22*scale)
+  ctx.font=`${fs}px monospace`; ctx.fillStyle=c
+  ctx.shadowColor=c; ctx.shadowBlur=5
+  ctx.fillText(`${mo} ${dd} ${yr}`, padX, h-Math.round(42*scale))
+  ctx.fillText(`${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`, padX, h-Math.round(16*scale))
+  ctx.shadowBlur=0
+}
+
+// ── Static Filter (CAM02/03 — 노이즈만, 블루톤/타임스탬프 없음) ───────────────
+function applyStaticFilter(ctx,w,h,isThumb){
+  const dpr = window.devicePixelRatio || 1
+  // 스캔라인
+  state.staticScanOffset=(state.staticScanOffset+0.9*dpr)%h
+  const lineH  = Math.ceil(2 * dpr)
+  const lineGap = Math.ceil(4 * dpr)
+  ctx.fillStyle='rgba(0,0,0,0.30)'
+  for(let y=0;y<h;y+=lineGap) ctx.fillRect(0,(y+state.staticScanOffset)%h,w,lineH)
+  // 노이즈 — 흰색
+  const nc=Math.round(2400*(w*h)/(1280*720*dpr*dpr))
+  ctx.fillStyle='rgba(255,255,255,0.18)'
+  for(let i=0;i<nc;i++) ctx.fillRect(
+    Math.random()*w, Math.random()*h,
+    Math.ceil(dpr), Math.ceil(dpr)
+  )
+  // 비네팅
+  const vg=ctx.createRadialGradient(w/2,h/2,h*0.22,w/2,h/2,h*0.88)
+  vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,0,0.7)')
+  ctx.fillStyle=vg; ctx.fillRect(0,0,w,h)
+  // 타임스탬프 — 썸네일은 스킵
+  if (!isThumb) applyCCTVTimestamp(ctx, w, h, 'rgba(255,255,255,0.85)')
+}
+
+// ── Capture (CAM01 전용) ──────────────────────────────────────────────────────
+function buildCaptureCanvas(results){
+  const w=state.video.videoWidth,h=state.video.videoHeight
+  const cap=document.createElement('canvas'); cap.width=w; cap.height=h
+  const ctx=cap.getContext('2d',{willReadFrequently:true})
+
+  ctx.save(); ctx.translate(w,0); ctx.scale(-1,1)
+  ctx.drawImage(results.image,0,0,w,h); ctx.restore()
+
+  const ghost=pickRandomGhost()
+  if(ghost){
+    const bounds=getPersonBounds(results.segmentationMask,w,h)
+    const{gx,gy,gw,gh}=computeGhostPlacement(bounds,w,h,ghost)
+    ctx.save(); ctx.globalAlpha=0.55
+    ctx.filter='blur(2px)'
+    ctx.drawImage(ghost,gx+(Math.random()-0.5)*4,gy+(Math.random()-0.5)*4,gw,gh)
+    ctx.filter='none'
+    ctx.globalAlpha=1; ctx.restore()
+  }
+
+  const cm=document.createElement('canvas'); cm.width=w; cm.height=h
+  const mc=cm.getContext('2d')
+  mc.save(); mc.translate(w,0); mc.scale(-1,1)
+  mc.drawImage(results.segmentationMask,0,0,w,h); mc.restore()
+  mc.globalCompositeOperation='source-in'
+  mc.save(); mc.translate(w,0); mc.scale(-1,1)
+  mc.drawImage(results.image,0,0,w,h); mc.restore()
+  mc.globalCompositeOperation='source-over'
+  ctx.drawImage(cm,0,0)
+
+  applyCCTVFilter(ctx,w,h)
+  const scale=h/720, fs=Math.round(18*scale), padX=Math.round(22*scale)
+  const now=new Date()
+  const mo=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][now.getMonth()]
+  const dd=String(now.getDate()).padStart(2,'0'),yr=now.getFullYear()
+  let hh=now.getHours(); const ap=hh>=12?'PM':'AM'; hh=hh%12||12
+  const mm=String(now.getMinutes()).padStart(2,'0'),ss=String(now.getSeconds()).padStart(2,'0')
+  ctx.font=`${fs}px monospace`; ctx.fillStyle='#7eb8ff'
+  ctx.shadowColor='#7eb8ff'; ctx.shadowBlur=5
+  if (w < 720) {
+    // 모바일: 폰트 크기 0.75배 + 행간 비율 고정
+    const mfs = Math.max(10, Math.round(fs * 0.75))
+    const gap = Math.round(mfs * 1.55)
+    const bot = Math.round(mfs * 1.4)
+    ctx.font=`${mfs}px monospace`
+    ctx.fillText(`${mo} ${dd} ${yr}`, padX, h - bot - gap)
+    ctx.fillText(`${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`, padX, h - bot)
+  } else {
+    // PC: 원래 방식
+    ctx.fillText(`${mo} ${dd} ${yr}`, padX, h-Math.round(42*scale))
+    ctx.fillText(`${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`, padX, h-Math.round(16*scale))
+  }
+  ctx.shadowBlur=0
+  return cap
+}
+
+// ── Shutter ───────────────────────────────────────────────────────────────────
+async function onShutter(){
+  if(state.isCapturing) return
+  const cam = state.currentCam
+  if(cam === 4) return
+  if(cam === 1 && !state.lastSegResults) return
+  state.isCapturing=true
+  playSfx(sfxCamera)
+  if(tooltipTimer) { clearTimeout(tooltipTimer); tooltipTimer = null }
+  document.getElementById('shutter-tooltip').classList.remove('visible')
+
+  const flash=document.getElementById('flash'),dev=document.getElementById('dev-text')
+  flash.style.transition='opacity 0.04s'; flash.style.opacity='1'
+  await sleep(80)
+  flash.style.transition='opacity 0.3s'; flash.style.opacity='0'
+  dev.style.transition='opacity 0.2s'; dev.style.opacity='1'
+  await sleep(650)
+
+  let cap
+  if(cam === 1) {
+    cap = buildCaptureCanvas(state.lastSegResults)
+  } else {
+    // CAM02/03: 현재 정적 캔버스 스크린샷 + ghost_normal 합성
+    cap = buildStaticCapture(cam)
+  }
+
+  state.lastDataURL=cap.toDataURL('image/png')
+  dev.style.opacity='0'; state.isCapturing=false
+
+  // 결과 타이틀 문구
+  const titleEl = document.getElementById('result-title')
+  if(titleEl) {
+    titleEl.textContent = cam === 1
+      ? '수상한 형체 포착'
+      : '아무것도 발견되지 않았다..'
+  }
+
+  const img=document.getElementById('result-img')
+  img.src=state.lastDataURL; img.classList.remove('visible')
+  showScreen('screen-result')
+  requestAnimationFrame(()=>requestAnimationFrame(()=>img.classList.add('visible')))
+}
+
+// CAM02/03 현재 화면 캡처 (귀신 없음)
+function buildStaticCapture(camNum) {
+  const sc = document.getElementById('main-static-canvas')
+  const cap = document.createElement('canvas')
+  cap.width  = sc.width  || 960
+  cap.height = sc.height || 540
+  const ctx = cap.getContext('2d')
+
+  // 현재 화면 그대로 복사
+  ctx.drawImage(sc, 0, 0, cap.width, cap.height)
+
+  // 타임스탬프
+  const scale = cap.height/720, fs = Math.round(18*scale), padX = Math.round(22*scale)
+  const now=new Date()
+  const mo=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][now.getMonth()]
+  const dd=String(now.getDate()).padStart(2,'0'),yr=now.getFullYear()
+  let hh=now.getHours(); const ap=hh>=12?'PM':'AM'; hh=hh%12||12
+  const mm=String(now.getMinutes()).padStart(2,'0'),ss=String(now.getSeconds()).padStart(2,'0')
+  ctx.font=`${fs}px monospace`; ctx.fillStyle='rgba(255,255,255,0.85)'
+  ctx.shadowColor='#fff'; ctx.shadowBlur=4
+  ctx.fillText(`${mo} ${dd} ${yr}`,padX,cap.height-Math.round(42*scale))
+  ctx.fillText(`${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`,padX,cap.height-Math.round(16*scale))
+  ctx.shadowBlur=0
+  return cap
+}
+
+// ── Result ────────────────────────────────────────────────────────────────────
+function saveImage(){
+  if(!state.lastDataURL) return
+  const a=document.createElement('a'); a.href=state.lastDataURL
+  a.download=`ghost_${Date.now()}.png`; a.click()
+}
+function retake(){ showScreen('screen-camera'); startTooltipTimer() }
+
+// ── 공유하기 ──────────────────────────────────────────────────────────────────
+async function shareImage(){
+  if(!state.lastDataURL) return
+  try {
+    const res = await fetch(state.lastDataURL)
+    const blob = await res.blob()
+    const file = new File([blob], `ghost_${Date.now()}.png`, { type: 'image/png' })
+    if(navigator.share && navigator.canShare({ files: [file] })){
+      await navigator.share({ files: [file], title: 'Ghost Camera' })
+    } else {
+      // 공유 API 미지원 시 다운로드로 폴백
+      saveImage()
+    }
+  } catch(e) { console.warn('share:', e) }
+}
+
+// ── 툴팁 타이머 ──────────────────────────────────────────────────────────────
+let tooltipTimer = null
+let tooltipCount = 0
+function startTooltipTimer(){
+  const tip = document.getElementById('shutter-tooltip')
+  if(!tip || tooltipCount >= 2) return
+  if(tooltipTimer) clearTimeout(tooltipTimer)
+  tip.classList.remove('visible')
+  tooltipTimer = setTimeout(() => {
+    tip.classList.add('visible')
+    tooltipCount++
+    setTimeout(() => {
+      tip.classList.remove('visible')
+      // 2회차 아니면 5초 후 재노출
+      if(tooltipCount < 2) startTooltipTimer()
+    }, 3000)
+  }, tooltipCount === 0 ? 3000 : 5000)
+}
+
+// ── Face Mesh (셔터 시점에만 실행) ────────────────────────────────────────────
+let faceMesh = null
+let faceMeshReady = false
+
+function initFaceMesh() {
+  if (faceMesh) return
+  faceMesh = new FaceMesh({
+    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${f}`
+  })
+  faceMesh.setOptions({
+    maxNumFaces: 1,
+    refineLandmarks: true,
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5
+  })
+  faceMesh.onResults(r => { faceMeshReady = true; faceMeshLastResults = r })
+  faceMesh.initialize().then(() => console.log('[FaceMesh] ready'))
+}
+
+let faceMeshLastResults = null
+
+// 셔터 시점에 한 번만 실행 — Promise로 랜드마크 반환
+function detectFaceLandmarks(videoEl) {
+  return new Promise((resolve) => {
+    if (!faceMesh) { resolve(null); return }
+    faceMesh.onResults(results => {
+      resolve(results.multiFaceLandmarks?.[0] || null)
+    })
+    faceMesh.send({ image: videoEl }).catch(() => resolve(null))
+    // 1.5초 타임아웃
+    setTimeout(() => resolve(null), 1500)
+  })
+}
+
+// 눈 중심 좌표 추출 (정규화 → 픽셀 변환)
+// Face Mesh 눈 랜드마크 인덱스:
+// 왼눈(카메라 기준): 468~472  오른눈: 473~477
+function getEyeCenters(landmarks, w, h) {
+  if (!landmarks) return null
+  // 캔버스가 미러링됐으므로 x 반전
+  const px = (lm) => ({ x: (1 - lm.x) * w, y: lm.y * h })
+
+  // 왼눈 inner corner: 133, outer corner: 33
+  // 오른눈 inner corner: 362, outer corner: 263
+  const leftInner  = px(landmarks[133])
+  const leftOuter  = px(landmarks[33])
+  const rightInner = px(landmarks[362])
+  const rightOuter = px(landmarks[263])
+
+  // 눈 중심
+  const leftCX  = (leftInner.x  + leftOuter.x)  / 2
+  const leftCY  = (leftInner.y  + leftOuter.y)  / 2
+  const rightCX = (rightInner.x + rightOuter.x) / 2
+  const rightCY = (rightInner.y + rightOuter.y) / 2
+
+  // 눈 너비 = inner~outer 거리
+  const leftW  = Math.abs(leftOuter.x  - leftInner.x)
+  const rightW = Math.abs(rightOuter.x - rightInner.x)
+
+  return {
+    left:  { x: leftCX,  y: leftCY,  w: Math.max(leftW,  20) },
+    right: { x: rightCX, y: rightCY, w: Math.max(rightW, 20) }
+  }
+}
+// ── Ghost Presence System (Soft / No Glitch) ─────────────────────────────────
+function distortFrame(ctx, w, h) {
+  const sliceH = 2, intensity = 3
+  for (let y = 0; y < h; y += sliceH) {
+    if (Math.random() < 0.05) {
+      try {
+        const slice = ctx.getImageData(0, y, w, sliceH)
+        ctx.putImageData(slice, (Math.random()-0.5)*intensity*2, y)
+      } catch(e) {}
+    }
+  }
+}
+
+let presenceActive = false, presenceLoop = null
+
+function runGhostEvent() {
+  if (presenceActive || state.currentCam !== 1) return
+  presenceActive = true
+  const el = document.getElementById('presence-overlay')
+  if (!el) { presenceActive = false; return }
+  el.style.setProperty('--px', (40 + Math.random()*20) + '%')
+  el.style.setProperty('--py', (25 + Math.random()*35) + '%')
+  el.style.opacity = '0.18'
+  presenceLoop = setInterval(() => {
+    if (state.canvas && state.ctx)
+      distortFrame(state.ctx, state.canvas.width, state.canvas.height)
+  }, 120)
+  const duration = 1500 + Math.random() * 1000
+  setTimeout(() => {
+    el.style.opacity = '0'
+    clearInterval(presenceLoop); presenceLoop = null
+    setTimeout(() => { presenceActive = false }, 1300)
+  }, duration)
+}
+
+function startPresenceSystem() {
+  setInterval(() => { if (Math.random() < 0.12) runGhostEvent() }, 4000)
+}
+
+const leftEyeImg  = new Image(); leftEyeImg.src  = 'lefteye.png'
+const rightEyeImg = new Image(); rightEyeImg.src = 'righteye.png'
+
+function applyEyeEffect(ctx, eyeCenters, w, h) {
+  if (!eyeCenters) return
+
+  const drawEye = (img, eye, angle) => {
+    if (!img.complete || !img.naturalWidth) return
+    const eyeW = eye.w * 2.0
+    const eyeH = eyeW * (img.naturalHeight / img.naturalWidth)
+    const cx = eye.x
+    const cy = eye.y - eyeH * 0.28  // 검은 구멍 35% 지점을 눈 중심에
+    ctx.save()
+    ctx.globalCompositeOperation = 'multiply'
+    ctx.globalAlpha = 0.95
+    // 눈 중심으로 이동 후 회전
+    ctx.translate(cx, cy)
+    ctx.rotate(angle)
+    ctx.drawImage(img, -eyeW/2, -eyeH/2, eyeW, eyeH)
+    ctx.restore()
+  }
+
+  // 두 눈의 각도 계산
+  const dx = eyeCenters.right.x - eyeCenters.left.x
+  const dy = eyeCenters.right.y - eyeCenters.left.y
+  const angle = Math.atan2(dy, dx)
+
+  drawEye(leftEyeImg,  eyeCenters.left,  angle)
+  drawEye(rightEyeImg, eyeCenters.right, angle)
+}
+
+</script>
+</body>
+</html>
