@@ -1386,13 +1386,13 @@ async function startCamera() {
   let stream
   try {
     const isMobile = window.innerWidth <= 720
-    const idealW = isMobile ? 480 : 1280
-    const idealH = isMobile ? 270 : 720
+    const idealW = isMobile ? 640 : 1280
+    const idealH = isMobile ? 360 : 720
     stream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: 'user',
-        width:  { ideal: idealW, max: isMobile ? 640 : 1920 },
-        height: { ideal: idealH, max: isMobile ? 480 : 1080 },
+        width:  { ideal: idealW },
+        height: { ideal: idealH },
         aspectRatio: { ideal: 16/9 }
       },
       audio: false,
@@ -1468,31 +1468,17 @@ function initSegmentation() {
   const seg = new SelfieSegmentation({
     locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1.1675465747/${f}`,
   })
-  seg.setOptions({ modelSelection: 0 })  // 0=경량(빠름), 1=정밀(느림)
+  seg.setOptions({ modelSelection: 1 })
   seg.onResults(onSegResults)
   state.segmentation = seg
   sendFrame()
 }
 
-let frameSkip = 0
-const isMobileDevice = window.innerWidth <= 720
-
 function sendFrame() {
-  if (state.video && state.video.readyState >= 2) {
-    if (isMobileDevice) {
-      frameSkip++
-      if (frameSkip % 3 === 0) {
-        state.segmentation.send({ image: state.video })
-      } else {
-        if (state.lastSegResults) drawFrame(state.lastSegResults)
-        requestAnimationFrame(sendFrame)
-      }
-    } else {
-      state.segmentation.send({ image: state.video })
-    }
-  } else {
+  if (state.video && state.video.readyState >= 2)
+    state.segmentation.send({ image: state.video })
+  else
     requestAnimationFrame(sendFrame)
-  }
 }
 
 function onSegResults(results) {
