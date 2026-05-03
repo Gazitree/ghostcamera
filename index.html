@@ -1094,10 +1094,9 @@ function startStaticRender(camNum) {
       applyStaticFilter(ctx, w, h, false, true)
 
       // 타임스탬프 (비네팅 뒤)
-      const dpr = window.devicePixelRatio || 1
       applyCCTVTimestamp(ctx, w, h, 'rgba(255,255,255,0.85)')
-
-      // 스캔라인만 살짝 위에
+      // 스캔라인만 살짝 위에 (자연스러운 줄무늬)
+      const dpr = window.devicePixelRatio || 1
       const tsLineH = Math.ceil(2 * dpr)
       const tsLineGap = Math.ceil(4 * dpr)
       ctx.fillStyle='rgba(0,0,0,0.15)'
@@ -1497,7 +1496,6 @@ function onSegResults(results) {
         setTimeout(() => sn.classList.remove('visible'), 1000)
       }, 5000)
     }
-    initFaceMesh()
     startPresenceSystem()
   }
   drawFrame(results)
@@ -1544,34 +1542,19 @@ function drawFrame(results) {
   const tctx = tc1.getContext('2d')
   tctx.drawImage(canvas, 0, 0, tc1.width, tc1.height)
 
-  // CAM01 타임스탬프 + CAM 라벨 — 비네팅 뒤에 (선명하게)
+  // CAM01 타임스탬프
   {
     const now=new Date()
     const mo=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][now.getMonth()]
     const dd=String(now.getDate()).padStart(2,'0'),yr=now.getFullYear()
     let hh=now.getHours(); const ap=hh>=12?'PM':'AM'; hh=hh%12||12
     const mm=String(now.getMinutes()).padStart(2,'0'),ss=String(now.getSeconds()).padStart(2,'0')
-    const dispH = canvas.getBoundingClientRect().height || h
-    const ratio = h / dispH
-    const sc = dispH / 720
-    const fs = Math.round(18 * sc)
-    const px = Math.round(22 * sc)
-    const y1 = h - Math.round(39 * sc * ratio)
-    const y2 = h - Math.round(16 * sc * ratio)
-
-    // 타임스탬프
-    ctx.font=`${Math.round(fs * ratio)}px monospace`; ctx.fillStyle='#7eb8ff'
+    const sc=h/720, fs=Math.round(18*sc), px=Math.round(22*sc)
+    ctx.font=`${fs}px monospace`; ctx.fillStyle='#7eb8ff'
     ctx.shadowColor='#7eb8ff'; ctx.shadowBlur=5
-    ctx.fillText(`${mo} ${dd} ${yr}`, Math.round(px * ratio), y1)
-    ctx.fillText(`${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`, Math.round(px * ratio), y2)
+    ctx.fillText(`${mo} ${dd} ${yr}`,px,h-Math.round(39*sc))
+    ctx.fillText(`${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`,px,h-Math.round(16*sc))
     ctx.shadowBlur=0
-
-    // 스캔라인만 살짝 위에 (자연스러운 줄무늬)
-    const scale01 = h / 720
-    const tsLineH = Math.max(1, Math.round(2 * scale01))
-    const tsLineGap = Math.max(2, Math.round(4 * scale01))
-    ctx.fillStyle='rgba(0,0,0,0.12)'
-    for(let y=0;y<h;y+=tsLineGap) ctx.fillRect(0,(y+state.scanlineOffset)%h,w,tsLineH)
   }
 }
 
@@ -1689,19 +1672,14 @@ function applyCCTVTimestamp(ctx, w, h, color) {
   const dd=String(now.getDate()).padStart(2,'0'),yr=now.getFullYear()
   let hh=now.getHours(); const ap=hh>=12?'PM':'AM'; hh=hh%12||12
   const mm=String(now.getMinutes()).padStart(2,'0'),ss=String(now.getSeconds()).padStart(2,'0')
-  // 화면 표시 크기 기준
-  const mainView = document.getElementById('main-view')
-  const dispH = mainView ? mainView.getBoundingClientRect().height : h
-  const ratio = h / (dispH || h)
-  const sc = (dispH || h) / 720
+  const sc=h/720
   const c = color || '#7eb8ff'
-  const fs = Math.round(18 * sc)
-  const padX = Math.round(22 * sc * ratio)
-  ctx.font=`${Math.round(fs * ratio)}px monospace`; ctx.fillStyle=c
-  // CAM01(파란색)만 glow, CAM02/03(흰색)은 번짐 방지로 glow 없음
+  const fs = Math.round(18*sc)
+  const padX = Math.round(22*sc)
+  ctx.font=`${fs}px monospace`; ctx.fillStyle=c
   if (c === '#7eb8ff') { ctx.shadowColor=c; ctx.shadowBlur=5 }
-  ctx.fillText(`${mo} ${dd} ${yr}`, padX, h-Math.round(39*sc*ratio))
-  ctx.fillText(`${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`, padX, h-Math.round(16*sc*ratio))
+  ctx.fillText(`${mo} ${dd} ${yr}`, padX, h-Math.round(39*sc))
+  ctx.fillText(`${String(hh).padStart(2,'0')}:${mm}:${ss} ${ap}`, padX, h-Math.round(16*sc))
   ctx.shadowBlur=0
 }
 
@@ -1904,82 +1882,8 @@ function startTooltipTimer(){
   }, tooltipCount === 0 ? 3000 : 5000)
 }
 
-// ── Face Mesh (셔터 시점에만 실행) ────────────────────────────────────────────
-let faceMesh = null
-let faceMeshReady = false
-
-function initFaceMesh() {
-  if (faceMesh) return
-  // Face Mesh 스크립트 동적 로드
-  if (typeof FaceMesh === 'undefined') {
-    const s = document.createElement('script')
-    s.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js'
-    s.crossOrigin = 'anonymous'
-    s.onload = () => initFaceMesh()
-    document.head.appendChild(s)
-    return
-  }
-  faceMesh = new FaceMesh({
-    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${f}`
-  })
-  faceMesh.setOptions({
-    maxNumFaces: 1,
-    refineLandmarks: true,
-    minDetectionConfidence: 0.5,
-    minTrackingConfidence: 0.5
-  })
-  faceMesh.onResults(r => { faceMeshReady = true; faceMeshLastResults = r })
-  faceMesh.initialize().then(() => console.log('[FaceMesh] ready'))
-}
-
-let faceMeshLastResults = null
-
-// 셔터 시점에 한 번만 실행 — Promise로 랜드마크 반환
-function detectFaceLandmarks(videoEl) {
-  return new Promise((resolve) => {
-    if (!faceMesh) { resolve(null); return }
-    faceMesh.onResults(results => {
-      resolve(results.multiFaceLandmarks?.[0] || null)
-    })
-    faceMesh.send({ image: videoEl }).catch(() => resolve(null))
-    // 1.5초 타임아웃
-    setTimeout(() => resolve(null), 1500)
-  })
-}
-
-// 눈 중심 좌표 추출 (정규화 → 픽셀 변환)
-// Face Mesh 눈 랜드마크 인덱스:
-// 왼눈(카메라 기준): 468~472  오른눈: 473~477
-function getEyeCenters(landmarks, w, h) {
-  if (!landmarks) return null
-  // 캔버스가 미러링됐으므로 x 반전
-  const px = (lm) => ({ x: (1 - lm.x) * w, y: lm.y * h })
-
-  // 왼눈 inner corner: 133, outer corner: 33
-  // 오른눈 inner corner: 362, outer corner: 263
-  const leftInner  = px(landmarks[133])
-  const leftOuter  = px(landmarks[33])
-  const rightInner = px(landmarks[362])
-  const rightOuter = px(landmarks[263])
-
-  // 눈 중심
-  const leftCX  = (leftInner.x  + leftOuter.x)  / 2
-  const leftCY  = (leftInner.y  + leftOuter.y)  / 2
-  const rightCX = (rightInner.x + rightOuter.x) / 2
-  const rightCY = (rightInner.y + rightOuter.y) / 2
-
-  // 눈 너비 = inner~outer 거리
-  const leftW  = Math.abs(leftOuter.x  - leftInner.x)
-  const rightW = Math.abs(rightOuter.x - rightInner.x)
-
-  return {
-    left:  { x: leftCX,  y: leftCY,  w: Math.max(leftW,  20) },
-    right: { x: rightCX, y: rightCY, w: Math.max(rightW, 20) }
-  }
-}
 // ── Ghost Presence System (Soft / No Glitch) ─────────────────────────────────
 function distortFrame(ctx, w, h) {
-  // 얼굴 조각난 느낌 — 수평 슬라이스를 좌우로 밀기
   const sliceH = 4, intensity = 8
   for (let y = 0; y < h; y += sliceH) {
     if (Math.random() < 0.12) {
@@ -2003,7 +1907,7 @@ function runGhostEvent() {
   const cCtx = c ? c.getContext('2d') : null
   presenceLoop = setInterval(() => {
     if (c && cCtx) distortFrame(cCtx, c.width, c.height)
-  }, 80)
+  }, 200)
   const duration = 1500 + Math.random() * 1000
   setTimeout(() => {
     el.style.opacity = '0'
@@ -2014,37 +1918,6 @@ function runGhostEvent() {
 
 function startPresenceSystem() {
   setInterval(() => { if (Math.random() < 0.25) runGhostEvent() }, 3000)
-}
-
-const leftEyeImg  = new Image(); leftEyeImg.src  = 'lefteye.png'
-const rightEyeImg = new Image(); rightEyeImg.src = 'righteye.png'
-
-function applyEyeEffect(ctx, eyeCenters, w, h) {
-  if (!eyeCenters) return
-
-  const drawEye = (img, eye, angle) => {
-    if (!img.complete || !img.naturalWidth) return
-    const eyeW = eye.w * 2.0
-    const eyeH = eyeW * (img.naturalHeight / img.naturalWidth)
-    const cx = eye.x
-    const cy = eye.y - eyeH * 0.28  // 검은 구멍 35% 지점을 눈 중심에
-    ctx.save()
-    ctx.globalCompositeOperation = 'multiply'
-    ctx.globalAlpha = 0.95
-    // 눈 중심으로 이동 후 회전
-    ctx.translate(cx, cy)
-    ctx.rotate(angle)
-    ctx.drawImage(img, -eyeW/2, -eyeH/2, eyeW, eyeH)
-    ctx.restore()
-  }
-
-  // 두 눈의 각도 계산
-  const dx = eyeCenters.right.x - eyeCenters.left.x
-  const dy = eyeCenters.right.y - eyeCenters.left.y
-  const angle = Math.atan2(dy, dx)
-
-  drawEye(leftEyeImg,  eyeCenters.left,  angle)
-  drawEye(rightEyeImg, eyeCenters.right, angle)
 }
 
 </script>
